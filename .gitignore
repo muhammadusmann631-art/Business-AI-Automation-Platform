@@ -1,0 +1,21 @@
+# Secrets
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+backend/venv/
+backend/.venv/
+
+# Generated artifacts (Phase 4)
+backend/company.db
+backend/reports/
+
+# Node
+node_modules/
+frontend/.next/
+frontend/out/
+
+# Misc
+.DS_Store

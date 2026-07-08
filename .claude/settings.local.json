@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($deadline = \\(Get-Date\\).AddSeconds\\(30\\); do { try { $h = Invoke-RestMethod http://127.0.0.1:8000/health; break } catch { Start-Sleep -Milliseconds 500 } } while \\(\\(Get-Date\\) -lt $deadline\\); $b = @{ message = \"what color do I want my graphs to be?\"; session_id = \"fresh-session\" } | ConvertTo-Json; $r = Invoke-RestMethod -Uri http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body $b; \"FRESH: $\\($r.reply\\)\"; $b2 = @{ message = \"get June's sales and give me a one-line summary\"; session_id = \"fresh-session-2\" } | ConvertTo-Json; $r2 = Invoke-RestMethod -Uri http://127.0.0.1:8000/api/chat -Method Post -ContentType 'application/json' -Body $b2; \"MULTI: $\\($r2.reply\\)\")"
+    ]
+  }
+}
