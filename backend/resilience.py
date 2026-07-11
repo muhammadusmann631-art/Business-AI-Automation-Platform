@@ -90,12 +90,15 @@ def call_with_retry(
     tool_name: str = "tool",
     max_retries: int = DEFAULT_MAX_RETRIES,
     base_delay: float = DEFAULT_BASE_DELAY,
+    on_retry=None,
     **kwargs,
 ):
     """Call ``func(*args, **kwargs)`` with backoff on transient errors.
 
     Returns the function's result on success. Raises the original error on a
     permanent failure, or ``RetryExhausted`` when transient retries run out.
+    ``on_retry(attempt, wait, error)`` (optional) is invoked before each
+    backoff sleep — used by the tracer to record a retry span.
     """
     attempts = max_retries + 1
     for attempt in range(1, attempts + 1):
@@ -114,6 +117,11 @@ def call_with_retry(
                     f"[RETRY] attempt {attempt + 1}/{attempts} for {tool_name} "
                     f"after {wait:g}s — reason: {e}"
                 )
+                if on_retry is not None:
+                    try:
+                        on_retry(attempt, wait, e)
+                    except Exception:
+                        pass  # a tracing hook must never break the retry
                 _sleep(wait)
             else:
                 # Out of attempts: hand the caller enough to dead-letter it.

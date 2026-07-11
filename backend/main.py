@@ -1,6 +1,16 @@
 import os
 import re
+import sys
 from pathlib import Path
+
+# Make terminal logging robust to a limited console codec (Windows cp1252
+# cannot encode emoji like ⚠️). Without this, an emoji in a log line raises
+# UnicodeEncodeError and can turn a background log into a request failure.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from agents import Agent, Runner, function_tool
 from dotenv import load_dotenv
@@ -12,16 +22,18 @@ from pydantic import BaseModel
 import approval
 import database as db
 import dead_letter
+import feedback
 import qa
 import resilience
 import router
+import tracer
 from emailing import draft_email as draft_email_impl, send_email as send_email_impl
 from memory import PreferenceStore, ShortTermMemory
 from reporting import REPORTS_DIR, generate_report as generate_report_impl
 
 load_dotenv()
 
-app = FastAPI(title="AI Agent System — Phase 8")
+app = FastAPI(title="AI Agent System — Phase 10")
 
 short_term = ShortTermMemory()
 preferences = PreferenceStore(Path(__file__).parent / "preferences.json")
@@ -30,6 +42,16 @@ preferences = PreferenceStore(Path(__file__).parent / "preferences.json")
 # Seeding is idempotent and uses a read-write connection; the query TOOL only
 # ever touches the read-only path.
 db.seed()
+
+# Phase 9: initialise the trace store (separate traces.db). Safe/idempotent.
+tracer.init()
+
+# Phase 10: initialise the feedback store (feedback.db). Safe/idempotent.
+feedback.init()
+
+# Phase 10: last completed trace per session, so an inline correction ("no,
+# that's wrong...") can be linked to the response it is correcting.
+_LAST_TRACE: dict[str, str] = {}
 
 # Base URL used to turn a generated report path into a downloadable link.
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
@@ -58,8 +80,15 @@ _REQUEST_CTX: dict = {
     "request": "",
     "session_id": "default",
     "failures": [],
-    "pending": [],  # approval.Pending entries created during this request
+    "pending": [],       # approval.Pending entries created during this request
+    "trace_id": None,    # Phase 9: current request's trace (None -> spans no-op)
+    "tokens": 0,         # Phase 9: accumulated approximate token count
 }
+
+
+def _acct(n: int) -> None:
+    """Add to the request's running approximate token total (Phase 9)."""
+    _REQUEST_CTX["tokens"] = _REQUEST_CTX.get("tokens", 0) + int(n or 0)
 
 # Dev/test-only fault injector, armed from a `force_fail=...` directive in the
 # incoming message and cleared after each request. NOT a production feature.
@@ -121,36 +150,50 @@ def guarded(tool_name: str, fn):
     failure. Every unrecovered failure is recorded on the request context so
     the Phase 5 QA layer can flag it to the user.
     """
+    tid = _REQUEST_CTX.get("trace_id")
+
     def _do():
         _maybe_inject_fault(tool_name)
         return fn()
 
-    try:
-        return True, resilience.call_with_retry(_do, tool_name=tool_name)
-    except resilience.RetryExhausted as e:
-        # Transient failure survived all retries -> save it, alert, flag it.
-        dead_letter.save(
-            request=_REQUEST_CTX["request"],
-            tool=tool_name,
-            error=e.last_error,
-            attempts=e.attempts,
-            session_id=_REQUEST_CTX["session_id"],
-        )
-        _REQUEST_CTX["failures"].append(
-            {"tool": tool_name, "attempts": e.attempts, "error": str(e.last_error)}
-        )
-        return False, (
-            f"[TOOL FAILED] The '{tool_name}' step could not be completed after "
-            f"{e.attempts} attempts. It has been logged for review."
-        )
-    except Exception as e:
-        # Permanent error: not retried and not dead-lettered (a retry won't
-        # help), but the user still gets a clean message instead of a crash.
-        print(f"[TOOL FAILED] {tool_name} permanent error (not retried): {e}")
-        _REQUEST_CTX["failures"].append(
-            {"tool": tool_name, "attempts": 1, "error": str(e), "permanent": True}
-        )
-        return False, f"[TOOL FAILED] The '{tool_name}' step failed: {e}"
+    def _on_retry(attempt, wait, error):
+        # Phase 9: record each retry attempt as its own short span.
+        sid = tracer.start_span(tid, f"retry:{tool_name}", {"attempt": attempt + 1, "wait_s": wait})
+        tracer.end_span(sid, {"error": str(error)[:200]}, status="retry")
+
+    with tracer.span(tid, f"tool:{tool_name}") as sp:
+        try:
+            result = resilience.call_with_retry(_do, tool_name=tool_name, on_retry=_on_retry)
+            sp["output"] = result
+            return True, result
+        except resilience.RetryExhausted as e:
+            # Transient failure survived all retries -> save it, alert, flag it.
+            sp["status"] = "error"
+            sp["metadata"] = {"attempts": e.attempts, "error": str(e.last_error)[:200]}
+            dead_letter.save(
+                request=_REQUEST_CTX["request"],
+                tool=tool_name,
+                error=e.last_error,
+                attempts=e.attempts,
+                session_id=_REQUEST_CTX["session_id"],
+            )
+            _REQUEST_CTX["failures"].append(
+                {"tool": tool_name, "attempts": e.attempts, "error": str(e.last_error)}
+            )
+            return False, (
+                f"[TOOL FAILED] The '{tool_name}' step could not be completed after "
+                f"{e.attempts} attempts. It has been logged for review."
+            )
+        except Exception as e:
+            # Permanent error: not retried and not dead-lettered (a retry won't
+            # help), but the user still gets a clean message instead of a crash.
+            sp["status"] = "error"
+            sp["metadata"] = {"error": str(e)[:200], "permanent": True}
+            print(f"[TOOL FAILED] {tool_name} permanent error (not retried): {e}")
+            _REQUEST_CTX["failures"].append(
+                {"tool": tool_name, "attempts": 1, "error": str(e), "permanent": True}
+            )
+            return False, f"[TOOL FAILED] The '{tool_name}' step failed: {e}"
 
 
 @function_tool
@@ -227,6 +270,9 @@ def draft_email(to: str, subject: str, body: str, attachment: str = "", send: bo
     # Phase 7: sending is high-risk -> park it for human approval. The real
     # send happens ONLY in /api/approve, never here.
     if send and approval.classify_risk("send_email") == approval.REQUIRES_APPROVAL:
+        _asid = tracer.start_span(
+            _REQUEST_CTX.get("trace_id"), "approval", {"action": "send_email", "to": draft["to"]}
+        )
         entry = approval.create_pending(
             action="send_email",
             details={
@@ -242,6 +288,7 @@ def draft_email(to: str, subject: str, body: str, attachment: str = "", send: bo
             reason=approval.risk_reason("send_email"),
         )
         _REQUEST_CTX["pending"].append(entry)
+        tracer.end_span(_asid, {"approval_id": entry.approval_id}, status="pending")
         lines.append("")
         lines.append(
             f"[AWAITING APPROVAL] This email will be sent only after you approve it "
@@ -382,8 +429,13 @@ async def _execute_step(
         f"{context}\n"
         f"Your step to execute now: {step}"
     )
-    result = await Runner.run(sales_agent, input=worker_input)
-    return str(result.final_output or "")
+    with tracer.span(_REQUEST_CTX.get("trace_id"), f"step:{i}", step) as sp:
+        result = await Runner.run(sales_agent, input=worker_input)
+        out = str(result.final_output or "")
+        sp["output"] = out
+        sp["tokens"] = tracer.est_tokens(worker_input, out)
+        _acct(sp["tokens"])
+        return out
 
 
 async def _combine(
@@ -399,8 +451,13 @@ async def _combine(
         )
         + "\nWrite the final reply to the user."
     )
-    final = await Runner.run(supervisor_agent, input=supervisor_input)
-    return str(final.final_output or "")
+    with tracer.span(_REQUEST_CTX.get("trace_id"), "supervisor", "combine step results") as sp:
+        final = await Runner.run(supervisor_agent, input=supervisor_input)
+        out = str(final.final_output or "")
+        sp["output"] = out
+        sp["tokens"] = tracer.est_tokens(supervisor_input, out)
+        _acct(sp["tokens"])
+        return out
 
 
 async def run_supervised(raw_message: str, session_id: str) -> tuple[str, dict | None]:
@@ -425,12 +482,28 @@ async def run_supervised(raw_message: str, session_id: str) -> tuple[str, dict |
     _arm_fault(fault)
     try:
         memory_context = build_memory_context(session_id)
+        tid = _REQUEST_CTX.get("trace_id")
 
-        plan_result = await Runner.run(
-            planner_agent,
-            input=f"{memory_context}\n\nNew user request: {message}",
-        )
-        steps = plan_result.final_output.steps or [message]
+        # Phase 10 Mechanism B: inject relevant past corrections as context so
+        # the plan/response reflect them, without changing any pipeline code.
+        corrections = feedback.get_relevant_corrections(message, session_id)
+        if corrections:
+            print(f"[FEEDBACK] injecting {len(corrections)} past correction(s) as context")
+            notes = "\n".join(f"- {c}" for c in corrections)
+            memory_context = (
+                f"{memory_context}\nNotes from past feedback on similar requests "
+                f"(apply these):\n{notes}"
+            )
+
+        with tracer.span(tid, "planner", message) as sp:
+            plan_result = await Runner.run(
+                planner_agent,
+                input=f"{memory_context}\n\nNew user request: {message}",
+            )
+            steps = plan_result.final_output.steps or [message]
+            sp["output"] = steps
+            sp["tokens"] = tracer.est_tokens(memory_context, message, *steps)
+            _acct(sp["tokens"])
         print("[PLAN] " + "  ".join(f"{i}. {s}" for i, s in enumerate(steps, 1)))
 
         step_results: list[str] = []
@@ -444,7 +517,15 @@ async def run_supervised(raw_message: str, session_id: str) -> tuple[str, dict |
         # --- Phase 5 QA gate. Never let a QA hiccup crash the request. ---
         try:
             failures = _REQUEST_CTX["failures"]
-            result = qa.review(reply, step_results, steps, tool_failures=failures)
+            with tracer.span(tid, "qa", "draft answer") as sp:
+                result = qa.review(reply, step_results, steps, tool_failures=failures)
+                sp["output"] = "PASS" if result.passed else "FAIL"
+                sp["status"] = "success" if result.passed else "warning"
+                sp["metadata"] = {
+                    "checks_failed": len(result.findings),
+                    "findings": [f.reason for f in result.findings][:5],
+                    "redactions": result.redactions,
+                }
             reply = result.answer  # use the (possibly PII-redacted) version
 
             if not result.passed:
@@ -501,27 +582,70 @@ async def run_fast_track(message: str, session_id: str) -> str:
     Still memory-aware (Phase 3) and PII-safe (Phase 5's redactor), but skips
     everything that only matters when tools run.
     """
+    tid = _REQUEST_CTX.get("trace_id")
     memory_context = build_memory_context(session_id)
-    result = await Runner.run(
-        chat_agent,
-        input=f"{memory_context}\n\nUser: {message}",
-    )
-    reply = qa.pii_only(str(result.final_output or ""))
+    with tracer.span(tid, "fast_track", message) as sp:
+        result = await Runner.run(
+            chat_agent,
+            input=f"{memory_context}\n\nUser: {message}",
+        )
+        reply = qa.pii_only(str(result.final_output or ""))
+        sp["output"] = reply
+        sp["tokens"] = tracer.est_tokens(memory_context, message, reply)
+        _acct(sp["tokens"])
     short_term.add_turn(session_id, message, reply)
     router.log_cost("simple fast-track", memory_context, message, reply, overhead=100)
     return reply
 
 
-async def run_routed(message: str, session_id: str) -> tuple[str, dict | None]:
-    """Phase 8 entry point: classify first, then fast-track or full pipeline."""
-    history = short_term.history(session_id)
-    history_text = "\n".join(
-        f"User: {t['user']}\nAssistant: {t['assistant']}" for t in history[-6:]
-    )
-    decision, _reason = await router.classify(message, history_text)
-    if decision == router.SIMPLE:
-        return await run_fast_track(message, session_id), None
-    return await run_supervised(message, session_id)
+async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, str | None]:
+    """Phase 8 entry + Phase 9 trace: classify, then fast-track or full pipeline.
+
+    Owns the trace lifecycle — opens the trace, records router + response
+    spans, and closes it with the accumulated duration/tokens/status. All
+    tracing is best-effort and never changes the request's outcome.
+    """
+    # Phase 10: an inline correction ("no, that's wrong...") is feedback on the
+    # previous response in this session. Record it, then process normally.
+    if feedback.is_inline_correction(message) and _LAST_TRACE.get(session_id):
+        try:
+            _submit_feedback(_LAST_TRACE[session_id], session_id, "negative", message)
+        except Exception as e:
+            print(f"[FEEDBACK] inline capture failed: {e}")
+
+    tid = tracer.start_trace(message, session_id)
+    _REQUEST_CTX["trace_id"] = tid
+    _REQUEST_CTX["tokens"] = 0
+    route, status, reply, pending = "complex", "success", "", None
+    try:
+        history = short_term.history(session_id)
+        history_text = "\n".join(
+            f"User: {t['user']}\nAssistant: {t['assistant']}" for t in history[-6:]
+        )
+        with tracer.span(tid, "router", message) as sp:
+            decision, reason = await router.classify(message, history_text)
+            sp["output"] = decision
+            sp["tokens"] = tracer.est_tokens(message) + 15
+            sp["metadata"] = {"reason": reason}
+            _acct(sp["tokens"])
+        route = decision
+
+        if decision == router.SIMPLE:
+            reply = await run_fast_track(message, session_id)
+        else:
+            reply, pending = await run_supervised(message, session_id)
+
+        with tracer.span(tid, "response") as sp:
+            sp["output"] = reply
+            sp["status"] = "delivered"
+        if tid:
+            _LAST_TRACE[session_id] = tid  # for a future inline correction
+        return reply, pending, tid
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        tracer.end_trace(tid, reply, _REQUEST_CTX.get("tokens", 0), status, route)
 
 
 class ChatRequest(BaseModel):
@@ -532,6 +656,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     pending_approval: dict | None = None  # Phase 7: set when a decision is needed
+    trace_id: str | None = None           # Phase 9: correlate with the dashboard
 
 
 class ApprovalRequest(BaseModel):
@@ -551,10 +676,100 @@ async def chat(req: ChatRequest):
             detail="OPENAI_API_KEY is not set. Add it to backend/.env",
         )
     try:
-        reply, pending = await run_routed(req.message, req.session_id)
-        return ChatResponse(reply=reply, pending_approval=pending)
+        reply, pending, trace_id = await run_routed(req.message, req.session_id)
+        return ChatResponse(reply=reply, pending_approval=pending, trace_id=trace_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent run failed: {e}")
+
+
+@app.get("/api/traces")
+def api_traces(limit: int = 50, status: str | None = None, since: str | None = None):
+    """Phase 9: list recent traces (summaries), newest first."""
+    return {"traces": tracer.list_traces(limit=limit, status=status, since=since)}
+
+
+@app.get("/api/traces/{trace_id}")
+def api_trace(trace_id: str):
+    """Phase 9: one full trace with all its spans."""
+    trace = tracer.get_trace(trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="Trace not found.")
+    return trace
+
+
+@app.get("/api/stats")
+def api_stats():
+    """Phase 9: aggregate observability stats."""
+    return tracer.get_stats()
+
+
+def _submit_feedback(trace_id: str, session_id: str, rating: str, correction: str) -> dict:
+    """Store feedback and run the three application mechanisms. Never raises."""
+    # Pull the original request/response from the linked trace (Phase 9).
+    original_request = original_response = ""
+    trace = tracer.get_trace(trace_id) if trace_id else None
+    if trace:
+        original_request = trace.get("message") or ""
+        original_response = trace.get("response") or ""
+
+    entry = feedback.record(
+        trace_id, session_id, rating, correction, original_request, original_response
+    )
+
+    if rating == "positive":
+        print("[FEEDBACK] received: positive")
+    else:
+        print(f'[FEEDBACK] received: negative — category: {entry["category"]}'
+              + (f' — "{correction}"' if correction else ""))
+
+    # Mechanism A: a format correction becomes a durable preference (Phase 3).
+    if entry["applied"]:
+        preferences.save("response_style", correction.strip())
+        print(f'[FEEDBACK] auto-saved preference: "{correction.strip()}"')
+
+    # Mechanism C: surface recurring problems.
+    for issue in feedback.recurring_issues():
+        print(f'[FEEDBACK] ⚠️ recurring issue flagged: {issue["category"]} '
+              f'({issue["count"]} negatives)')
+
+    return entry
+
+
+class FeedbackRequest(BaseModel):
+    trace_id: str | None = None
+    rating: str  # "positive" | "negative"
+    correction: str = ""
+    session_id: str = "default"
+
+
+@app.post("/api/feedback")
+def api_feedback(req: FeedbackRequest):
+    """Phase 10: submit 👍/👎 (+ optional correction). Never crashes the chat."""
+    try:
+        sid = req.session_id
+        if req.trace_id:
+            trace = tracer.get_trace(req.trace_id)
+            if trace and trace.get("session_id"):
+                sid = trace["session_id"]
+        entry = _submit_feedback(req.trace_id or "", sid, req.rating, req.correction or "")
+        return {"feedback_id": entry["feedback_id"],
+                "category": entry["category"],
+                "applied": entry["applied"]}
+    except Exception as e:
+        # Feedback must never break the app — report cleanly.
+        raise HTTPException(status_code=500, detail=f"Feedback failed: {e}")
+
+
+@app.get("/api/feedback/stats")
+def api_feedback_stats():
+    """Phase 10: feedback analytics."""
+    return feedback.get_stats()
+
+
+@app.get("/api/feedback/recent")
+def api_feedback_recent(limit: int = 20):
+    """Phase 10: recent feedback entries."""
+    return {"feedback": feedback.get_recent(limit=limit)}
 
 
 @app.post("/api/approve", response_model=ChatResponse)
