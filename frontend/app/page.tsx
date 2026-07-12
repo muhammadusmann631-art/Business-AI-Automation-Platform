@@ -59,6 +59,8 @@ type PendingApproval = {
   risk_reason: string;
 };
 
+type FileOut = { name: string; url: string; type: string };
+
 type Message = {
   role: "user" | "assistant" | "error" | "approval";
   content: string;
@@ -67,6 +69,7 @@ type Message = {
   traceId?: string;
   feedback?: "sent";
   showCorrection?: boolean;
+  files?: FileOut[];
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -158,7 +161,7 @@ export default function Home() {
       }
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: data.reply, traceId: data.trace_id },
+        { role: "assistant", content: data.reply, traceId: data.trace_id, files: data.files },
       ]);
       if (data.pending_approval) {
         setMessages((prev) => [
@@ -437,6 +440,35 @@ export default function Home() {
                 }`}
               >
                 {m.content}
+                {m.files && m.files.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    {m.files.map((f) => (
+                      <a
+                        key={f.url}
+                        href={`${API_URL}${f.url}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        download
+                        className="flex items-center gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2.5 transition hover:border-emerald-400/50 hover:bg-emerald-500/10"
+                      >
+                        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15 text-lg">
+                          📄
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs font-semibold text-emerald-100">
+                            {f.name}
+                          </span>
+                          <span className="block text-[10px] uppercase tracking-wide text-emerald-300/50">
+                            {f.type} · click to download
+                          </span>
+                        </span>
+                        <span className="rounded-lg bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-black">
+                          Download
+                        </span>
+                      </a>
+                    ))}
+                  </div>
+                )}
                 {m.role === "assistant" && m.traceId && (
                   <div className="mt-2 flex items-center gap-2 border-t border-emerald-500/10 pt-2">
                     {m.feedback === "sent" ? (

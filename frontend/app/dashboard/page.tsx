@@ -60,15 +60,15 @@ function statusColor(status: string | null | undefined): string {
   switch (status) {
     case "success":
     case "delivered":
-      return "bg-emerald-100 text-emerald-700 border-emerald-200";
+      return "bg-emerald-500/15 text-emerald-300 border-emerald-400/30";
     case "error":
-      return "bg-rose-100 text-rose-700 border-rose-200";
+      return "bg-rose-500/15 text-rose-300 border-rose-400/30";
     case "warning":
     case "retry":
     case "pending":
-      return "bg-amber-100 text-amber-700 border-amber-200";
+      return "bg-amber-500/15 text-amber-300 border-amber-400/30";
     default:
-      return "bg-gray-100 text-gray-600 border-gray-200";
+      return "bg-slate-500/15 text-slate-300 border-slate-400/20";
   }
 }
 
@@ -122,18 +122,18 @@ export default function Dashboard() {
   }
 
   return (
-    <main className="min-h-full bg-gradient-to-br from-indigo-100 via-purple-50 to-rose-100 font-sans">
-      <header className="sticky top-0 z-10 border-b border-white/40 bg-white/60 backdrop-blur-md">
+    <main className="min-h-full bg-[#050807] font-sans text-emerald-50/90">
+      <header className="sticky top-0 z-10 border-b border-emerald-500/10 bg-[#050807]/80 backdrop-blur-md">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 text-lg shadow-lg shadow-indigo-500/25">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-emerald-500/30 bg-emerald-500/10 text-lg shadow-lg shadow-emerald-500/10">
               📊
             </div>
             <div>
-              <h1 className="bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-lg font-bold text-transparent">
+              <h1 className="text-lg font-bold tracking-wide text-emerald-300">
                 Observability Dashboard
               </h1>
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-emerald-200/40">
                 Phase 9 — traces &amp; spans
                 {lastRefresh && ` · refreshed ${lastRefresh.toLocaleTimeString()}`}
               </p>
@@ -142,13 +142,13 @@ export default function Dashboard() {
           <div className="flex items-center gap-2">
             <a
               href="/"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600 transition hover:bg-gray-50"
+              className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs font-semibold text-emerald-300/80 transition hover:bg-emerald-500/10"
             >
               ← Chat
             </a>
             <button
               onClick={refresh}
-              className="rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 px-3 py-2 text-xs font-semibold text-white shadow-md shadow-indigo-500/25 transition hover:from-indigo-600 hover:to-purple-700 active:scale-95"
+              className="rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-3 py-2 text-xs font-semibold text-black shadow-md shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"
             >
               Refresh
             </button>
@@ -173,12 +173,12 @@ export default function Dashboard() {
           ].map((k) => (
             <div
               key={k.label}
-              className="rounded-2xl border border-white/50 bg-white/80 p-4 shadow-sm"
+              className="rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.05] p-4"
             >
-              <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+              <p className="text-xs font-semibold uppercase tracking-wide text-emerald-200/40">
                 {k.label}
               </p>
-              <p className="mt-1 text-2xl font-bold text-gray-800">{k.value}</p>
+              <p className="mt-1 text-2xl font-bold text-emerald-300">{k.value}</p>
             </div>
           ))}
         </div>
@@ -189,7 +189,7 @@ export default function Dashboard() {
             {Object.entries(stats.tokens_by_route).map(([route, r]) => (
               <span
                 key={route}
-                className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 font-medium text-indigo-700"
+                className="rounded-full border border-emerald-500/25 bg-emerald-500/10 px-3 py-1 font-medium text-emerald-300"
               >
                 {route}: {r.requests} req · {r.tokens.toLocaleString()} tok · {Math.round(r.avg_ms)}ms
               </span>
@@ -197,7 +197,7 @@ export default function Dashboard() {
             {stats.slowest_tools?.map((t) => (
               <span
                 key={t.tool}
-                className="rounded-full border border-purple-200 bg-purple-50 px-3 py-1 font-medium text-purple-700"
+                className="rounded-full border border-teal-500/25 bg-teal-500/10 px-3 py-1 font-medium text-teal-300"
               >
                 {t.tool}: {Math.round(t.avg_ms)}ms avg ({t.calls})
               </span>
@@ -206,12 +206,12 @@ export default function Dashboard() {
         )}
 
         {/* Feedback section */}
-        <div className="mb-6 rounded-2xl border border-white/50 bg-white/80 p-4 shadow-sm">
+        <div className="mb-6 rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.05] p-4">
           <div className="mb-3 flex items-center gap-2">
             <span>💬</span>
-            <h2 className="text-sm font-bold text-gray-700">Feedback</h2>
+            <h2 className="text-sm font-bold text-emerald-200">Feedback</h2>
             {fbStats && (
-              <span className="text-xs text-gray-500">
+              <span className="text-xs text-emerald-200/40">
                 {fbStats.total} total · {fbStats.positive_pct}% 👍 · {fbStats.negative_pct}% 👎
               </span>
             )}
@@ -222,7 +222,7 @@ export default function Dashboard() {
               {fbStats.recurring_issues.map((r) => (
                 <p
                   key={r.category}
-                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800"
+                  className="rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-300"
                 >
                   ⚠️ {r.message}
                 </p>
@@ -235,7 +235,7 @@ export default function Dashboard() {
               {Object.entries(fbStats.by_category).map(([cat, n]) => (
                 <span
                   key={cat}
-                  className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 font-medium text-gray-600"
+                  className="rounded-full border border-emerald-500/20 bg-black/30 px-2.5 py-1 font-medium text-emerald-200/70"
                 >
                   {cat}: {n}
                 </span>
@@ -245,12 +245,12 @@ export default function Dashboard() {
 
           <div className="space-y-1.5">
             {fbRecent.length === 0 && (
-              <p className="text-xs text-gray-400">No feedback yet.</p>
+              <p className="text-xs text-emerald-200/30">No feedback yet.</p>
             )}
             {fbRecent.map((f) => (
               <div
                 key={f.feedback_id}
-                className="flex items-center gap-2 rounded-xl border border-gray-100 bg-white px-2.5 py-1.5 text-xs"
+                className="flex items-center gap-2 rounded-xl border border-emerald-500/10 bg-black/20 px-2.5 py-1.5 text-xs"
               >
                 <span>{f.rating === "positive" ? "👍" : "👎"}</span>
                 <span
@@ -260,10 +260,10 @@ export default function Dashboard() {
                 >
                   {f.category}
                 </span>
-                <span className="flex-1 truncate text-gray-600">
-                  {f.user_correction || <span className="text-gray-300">(no comment)</span>}
+                <span className="flex-1 truncate text-emerald-100/70">
+                  {f.user_correction || <span className="text-emerald-200/20">(no comment)</span>}
                 </span>
-                <span className="shrink-0 truncate text-gray-400" style={{ maxWidth: "30%" }}>
+                <span className="shrink-0 truncate text-emerald-200/30" style={{ maxWidth: "30%" }}>
                   {f.original_request}
                 </span>
               </div>
@@ -272,23 +272,23 @@ export default function Dashboard() {
         </div>
 
         {/* Trace list */}
-        <h2 className="mb-2 text-sm font-bold text-gray-700">Traces</h2>
+        <h2 className="mb-2 text-sm font-bold text-emerald-200">Traces</h2>
         <div className="space-y-2">
           {traces.length === 0 && (
-            <p className="rounded-2xl border border-white/50 bg-white/70 p-6 text-center text-sm text-gray-500">
+            <p className="rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.04] p-6 text-center text-sm text-emerald-200/40">
               No traces yet. Send a message in the chat to generate one.
             </p>
           )}
           {traces.map((t) => (
             <div
               key={t.trace_id}
-              className="overflow-hidden rounded-2xl border border-white/50 bg-white/80 shadow-sm"
+              className="overflow-hidden rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.05]"
             >
               <button
                 onClick={() => toggle(t.trace_id)}
-                className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-white"
+                className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-emerald-500/[0.08]"
               >
-                <span className="text-gray-400">{expanded === t.trace_id ? "▾" : "▸"}</span>
+                <span className="text-emerald-300/50">{expanded === t.trace_id ? "▾" : "▸"}</span>
                 <span
                   className={`shrink-0 rounded-lg border px-2 py-0.5 text-xs font-semibold ${statusColor(
                     t.status
@@ -296,26 +296,26 @@ export default function Dashboard() {
                 >
                   {t.status ?? "?"}
                 </span>
-                <span className="shrink-0 rounded-lg bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">
+                <span className="shrink-0 rounded-lg border border-emerald-500/15 bg-black/30 px-2 py-0.5 text-xs font-medium text-emerald-200/70">
                   {t.route ?? "—"}
                 </span>
-                <span className="flex-1 truncate text-sm text-gray-800">
+                <span className="flex-1 truncate text-sm text-emerald-50/90">
                   {t.message ?? "(no message)"}
                 </span>
-                <span className="shrink-0 text-xs text-gray-500">
+                <span className="shrink-0 text-xs text-emerald-200/40">
                   {t.total_duration_ms ?? "—"}ms · {t.total_tokens ?? 0} tok
                 </span>
               </button>
 
               {expanded === t.trace_id && (
-                <div className="space-y-1.5 border-t border-gray-100 bg-gray-50/60 px-4 py-3">
-                  <p className="mb-2 font-mono text-[11px] text-gray-400">
+                <div className="space-y-1.5 border-t border-emerald-500/10 bg-black/20 px-4 py-3">
+                  <p className="mb-2 font-mono text-[11px] text-emerald-200/30">
                     trace {t.trace_id} · {t.created_at}
                   </p>
                   {(spans[t.trace_id] ?? []).map((s) => (
                     <div
                       key={s.span_id}
-                      className="rounded-xl border border-gray-100 bg-white p-2.5 text-xs"
+                      className="rounded-xl border border-emerald-500/10 bg-emerald-500/[0.04] p-2.5 text-xs"
                     >
                       <div className="flex items-center gap-2">
                         <span
@@ -325,25 +325,25 @@ export default function Dashboard() {
                         >
                           {s.status}
                         </span>
-                        <span className="font-mono font-semibold text-gray-800">{s.name}</span>
-                        <span className="ml-auto text-gray-400">
+                        <span className="font-mono font-semibold text-emerald-100">{s.name}</span>
+                        <span className="ml-auto text-emerald-200/40">
                           {s.duration_ms}ms{s.tokens ? ` · ${s.tokens} tok` : ""}
                         </span>
                       </div>
                       {s.input && (
-                        <p className="mt-1 truncate text-gray-500">
-                          <span className="text-gray-400">in:</span> {s.input}
+                        <p className="mt-1 truncate text-emerald-200/50">
+                          <span className="text-emerald-200/30">in:</span> {s.input}
                         </p>
                       )}
                       {s.output && (
-                        <p className="mt-0.5 truncate text-gray-600">
-                          <span className="text-gray-400">out:</span> {s.output}
+                        <p className="mt-0.5 truncate text-emerald-100/60">
+                          <span className="text-emerald-200/30">out:</span> {s.output}
                         </p>
                       )}
                     </div>
                   ))}
                   {(spans[t.trace_id] ?? []).length === 0 && (
-                    <p className="text-xs text-gray-400">No spans recorded.</p>
+                    <p className="text-xs text-emerald-200/30">No spans recorded.</p>
                   )}
                 </div>
               )}

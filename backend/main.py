@@ -83,12 +83,28 @@ _REQUEST_CTX: dict = {
     "pending": [],       # approval.Pending entries created during this request
     "trace_id": None,    # Phase 9: current request's trace (None -> spans no-op)
     "tokens": 0,         # Phase 9: accumulated approximate token count
+    "files": [],         # Polish: downloadable files (PDFs) produced this request
+    "send_intent": False, # Polish: user explicitly asked to SEND an email
 }
 
 
 def _acct(n: int) -> None:
     """Add to the request's running approximate token total (Phase 9)."""
     _REQUEST_CTX["tokens"] = _REQUEST_CTX.get("tokens", 0) + int(n or 0)
+
+
+# Polish Fix 2: detect a genuine "send this email" intent from the user's own
+# words, so the human-approval gate fires even when the LLM only drafts. Covers
+# English + romanized Hindi/Urdu. A "draft only / don't send" phrase overrides.
+_SEND_VERB = re.compile(r"(?i)(\bsend\b|\bbhej|mail\s*kar|email\s*kar|forward\b|deliver\b)")
+_EMAIL_CTX = re.compile(r"(?i)(email|e-mail|\bmail\b|@)")
+_NO_SEND = re.compile(r"(?i)(draft only|just draft|only draft|don'?t send|do not send|na bhej|mat bhej)")
+
+
+def _detect_send_intent(message: str) -> bool:
+    if _NO_SEND.search(message or ""):
+        return False
+    return bool(_SEND_VERB.search(message or "") and _EMAIL_CTX.search(message or ""))
 
 # Dev/test-only fault injector, armed from a `force_fail=...` directive in the
 # incoming message and cleared after each request. NOT a production feature.
@@ -233,6 +249,11 @@ def generate_report(title: str, body: str) -> str:
     result = out
     print(f"[TOOL CALLED] generate_report -> {result['filename']}")
     url = f"{PUBLIC_BASE_URL}/reports/{result['filename']}"
+    # Polish Fix 1: surface the PDF as a structured file so the frontend can
+    # render a real download card (not just link text buried in the reply).
+    _REQUEST_CTX.setdefault("files", []).append(
+        {"name": result["filename"], "url": f"/reports/{result['filename']}", "type": "pdf"}
+    )
     return f"PDF report created: {url} (saved at {result['path']})"
 
 
@@ -269,7 +290,10 @@ def draft_email(to: str, subject: str, body: str, attachment: str = "", send: bo
 
     # Phase 7: sending is high-risk -> park it for human approval. The real
     # send happens ONLY in /api/approve, never here.
-    if send and approval.classify_risk("send_email") == approval.REQUIRES_APPROVAL:
+    # Polish Fix 2: honour the LLM's send flag OR a deterministic send-intent
+    # detected from the user's own words, so approval never gets skipped.
+    should_send = bool(send) or _REQUEST_CTX.get("send_intent", False)
+    if should_send and approval.classify_risk("send_email") == approval.REQUIRES_APPROVAL:
         _asid = tracer.start_span(
             _REQUEST_CTX.get("trace_id"), "approval", {"action": "send_email", "to": draft["to"]}
         )
@@ -598,7 +622,7 @@ async def run_fast_track(message: str, session_id: str) -> str:
     return reply
 
 
-async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, str | None]:
+async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, str | None, list]:
     """Phase 8 entry + Phase 9 trace: classify, then fast-track or full pipeline.
 
     Owns the trace lifecycle — opens the trace, records router + response
@@ -616,6 +640,8 @@ async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, s
     tid = tracer.start_trace(message, session_id)
     _REQUEST_CTX["trace_id"] = tid
     _REQUEST_CTX["tokens"] = 0
+    _REQUEST_CTX["files"] = []                                   # Polish Fix 1
+    _REQUEST_CTX["send_intent"] = _detect_send_intent(message)   # Polish Fix 2
     route, status, reply, pending = "complex", "success", "", None
     try:
         history = short_term.history(session_id)
@@ -640,7 +666,7 @@ async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, s
             sp["status"] = "delivered"
         if tid:
             _LAST_TRACE[session_id] = tid  # for a future inline correction
-        return reply, pending, tid
+        return reply, pending, tid, list(_REQUEST_CTX.get("files", []))
     except Exception:
         status = "error"
         raise
@@ -657,6 +683,7 @@ class ChatResponse(BaseModel):
     reply: str
     pending_approval: dict | None = None  # Phase 7: set when a decision is needed
     trace_id: str | None = None           # Phase 9: correlate with the dashboard
+    files: list[dict] = []                 # Polish Fix 1: downloadable outputs
 
 
 class ApprovalRequest(BaseModel):
@@ -676,8 +703,8 @@ async def chat(req: ChatRequest):
             detail="OPENAI_API_KEY is not set. Add it to backend/.env",
         )
     try:
-        reply, pending, trace_id = await run_routed(req.message, req.session_id)
-        return ChatResponse(reply=reply, pending_approval=pending, trace_id=trace_id)
+        reply, pending, trace_id, files = await run_routed(req.message, req.session_id)
+        return ChatResponse(reply=reply, pending_approval=pending, trace_id=trace_id, files=files)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent run failed: {e}")
 

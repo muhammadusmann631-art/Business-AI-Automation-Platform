@@ -52,14 +52,17 @@ def send_email(to: str, subject: str, body: str, attachment: str = "") -> str:
     password = os.getenv("SMTP_PASSWORD")
 
     if not (host and user and password):
-        print("[EMAIL] send skipped — no credentials configured")
-        return (
-            f"Email to {to} approved. (Actual delivery skipped — no SMTP "
-            f"credentials configured; add SMTP_HOST/USER/PASSWORD to backend/.env.)"
-        )
+        print("[EMAIL] send skipped — no SMTP credentials configured. "
+              "Set SMTP_HOST, SMTP_USER, SMTP_PASSWORD in backend/.env")
+        return f"Email approved but not sent — SMTP not configured (recipient: {to})."
 
     port = int(os.getenv("SMTP_PORT", "587"))
-    sender = os.getenv("SMTP_FROM", user)
+    # Support either SMTP_FROM or EMAIL_FROM; fall back to the login user.
+    # Ignore an unfilled placeholder / non-address (Gmail rejects a From that
+    # is not the authenticated user anyway).
+    sender = os.getenv("SMTP_FROM") or os.getenv("EMAIL_FROM") or user
+    if not sender or "@" not in sender or "your-email@" in sender:
+        sender = user
 
     msg = EmailMessage()
     msg["From"] = sender
