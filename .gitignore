@@ -1,21 +1,31 @@
 # Secrets
 .env
 .env.local
+**/.env
 
 # Python
 __pycache__/
 *.pyc
 backend/venv/
 backend/.venv/
+venv/
+.venv/
 
-# Generated artifacts (Phase 4)
-backend/company.db
+# Databases (ephemeral; re-seeded on startup)
+*.db
+backend/*.db
+
+# Generated artifacts (temporary)
 backend/reports/
+backend/exports/
+backend/charts/
 
-# Node
+# Node / Next.js
 node_modules/
 frontend/.next/
 frontend/out/
+.next/
 
 # Misc
 .DS_Store
+*.log

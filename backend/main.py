@@ -62,10 +62,11 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
 
 app.add_middleware(
     CORSMiddleware,
-    # Allow the Next.js dev server on ANY localhost port (it falls back to
-    # 3001/3002 when 3000 is taken) so browser fetches are never CORS-blocked.
-    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
-    allow_credentials=True,
+    # Deployment: allow all origins for now (the frontend also proxies /api via
+    # Next.js rewrites, so most calls are same-origin). Restrict once auth lands.
+    # credentials must be False with a wildcard origin (we use no cookies).
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1093,3 +1094,11 @@ async def reject_action(req: ApprovalRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Rejection failed: {e}")
+
+
+if __name__ == "__main__":
+    # Local / platform run. Render (and most hosts) inject PORT — honour it.
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

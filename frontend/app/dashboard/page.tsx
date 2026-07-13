@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+// Relative — Next.js rewrites proxy these to the backend (see next.config.ts).
+const API_URL = "";
 
 type Span = {
   span_id: string;

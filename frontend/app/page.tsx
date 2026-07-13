@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+// Relative — Next.js rewrites (next.config.ts) proxy these to the backend, so
+// the app works from a single URL both locally and on Render.
+const API_URL = "";
 
 /* ----------------------------- Radial hub config ----------------------------- */
 // One node per real agent / tool in the system. Positions are computed on an
