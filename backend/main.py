@@ -20,20 +20,24 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import approval
+import charting
 import database as db
 import dead_letter
+import exporting
 import feedback
 import qa
 import resilience
 import router
 import tracer
+from charting import CHARTS_DIR
 from emailing import draft_email as draft_email_impl, send_email as send_email_impl
+from exporting import EXPORTS_DIR
 from memory import PreferenceStore, ShortTermMemory
 from reporting import REPORTS_DIR, generate_report as generate_report_impl
 
 load_dotenv()
 
-app = FastAPI(title="AI Agent System — Phase 10")
+app = FastAPI(title="AI Agent System — Level 1 (business)")
 
 short_term = ShortTermMemory()
 preferences = PreferenceStore(Path(__file__).parent / "preferences.json")
@@ -58,15 +62,21 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    # Allow the Next.js dev server on ANY localhost port (it falls back to
+    # 3001/3002 when 3000 is taken) so browser fetches are never CORS-blocked.
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Serve generated PDF reports so the reply can link to a downloadable file.
+# Serve generated artifacts so the reply can link to / render them.
 REPORTS_DIR.mkdir(exist_ok=True)
+EXPORTS_DIR.mkdir(exist_ok=True)
+CHARTS_DIR.mkdir(exist_ok=True)
 app.mount("/reports", StaticFiles(directory=REPORTS_DIR), name="reports")
+app.mount("/exports", StaticFiles(directory=EXPORTS_DIR), name="exports")   # Level 1: Excel
+app.mount("/charts", StaticFiles(directory=CHARTS_DIR), name="charts")      # Level 1: charts
 
 
 # --------------------------------------------------------------------------- #
@@ -339,25 +349,209 @@ def save_preference(key: str, value: str) -> str:
     return f"Preference saved: {key} = {value}."
 
 
+# Schema summary reused in tool docstrings + agent instructions.
+_SCHEMA_HINT = (
+    "Tables & columns:\n"
+    "- sales(month, amount, customer_id)\n"
+    "- customers(id, name, email, company, phone, city, status[active|inactive|lead])\n"
+    "- invoices(id, invoice_number, customer_id, amount, status[pending|paid|overdue|"
+    "cancelled], due_date, paid_date, description)\n"
+    "- products(id, name, category, price, stock, status[active|discontinued])\n"
+    "- expenses(id, category[salary|rent|utilities|marketing|supplies|other], amount, "
+    "description, date)"
+)
+
+
+def _format_rows(rows: list[dict], limit: int = 50) -> str:
+    """Compact text table of query results for the LLM to read."""
+    if not rows:
+        return "Query returned no rows."
+    cols = list(rows[0].keys())
+    lines = [" | ".join(cols)]
+    for r in rows[:limit]:
+        lines.append(" | ".join(str(r.get(c, "")) for c in cols))
+    if len(rows) > limit:
+        lines.append(f"... ({len(rows) - limit} more rows)")
+    lines.append(f"[{len(rows)} row(s)]")
+    return "\n".join(lines)
+
+
+def _chart_color() -> str:
+    """Honour a saved colour preference for charts (e.g. 'graphs blue')."""
+    prefs = preferences.all()
+    for k in ("graph_color", "chart_color", "graphs", "color"):
+        if prefs.get(k):
+            return prefs[k]
+    return "#43e0a3"
+
+
+@function_tool
+def query_database(sql: str) -> str:
+    """Run a READ-ONLY SQL SELECT against the business database and return rows.
+
+    Use this for ANY data question about customers, invoices, products,
+    expenses, or sales. Write a single standard SQLite SELECT (you may use
+    JOIN, WHERE, GROUP BY, ORDER BY, aggregates). Writes are impossible — only
+    SELECT is allowed. See the worker instructions for the full schema.
+
+    Args:
+        sql: One read-only SELECT statement.
+    """
+    print(f"[TOOL CALLED] query_database: {sql[:120]}")
+    try:
+        db._ensure_read_only(sql)
+    except db.UnsafeQueryError as e:
+        return f"Query rejected (read-only): {e}"
+    ok, out = guarded("query_database", lambda: db.run_select(sql))
+    if not ok:
+        return out
+    return _format_rows(out)
+
+
+@function_tool
+def export_excel(query: str, title: str) -> str:
+    """Export the result of a read-only SQL SELECT to a downloadable Excel file.
+
+    Use when the user asks for data "in Excel"/".xlsx". Write a SELECT that
+    returns the columns to export.
+
+    Args:
+        query: A read-only SELECT whose rows become the spreadsheet.
+        title: Short title for the file, e.g. "Overdue Invoices".
+    """
+    print(f"[TOOL CALLED] export_excel: {title}")
+    try:
+        db._ensure_read_only(query)
+    except db.UnsafeQueryError as e:
+        return f"Query rejected (read-only): {e}"
+
+    def _do():
+        rows = db.run_select(query)
+        return exporting.export_rows(title, rows)
+
+    ok, out = guarded("export_excel", _do)
+    if not ok:
+        return out
+    _REQUEST_CTX.setdefault("files", []).append(
+        {"name": out["filename"], "url": f"/exports/{out['filename']}", "type": "excel"}
+    )
+    return f"Excel file created: {PUBLIC_BASE_URL}/exports/{out['filename']}"
+
+
+@function_tool
+def make_chart(query: str, title: str, chart_type: str = "bar") -> str:
+    """Create a bar or line chart image from a read-only SQL SELECT.
+
+    The query MUST return two columns: a label (first column) and a numeric
+    value (second column). Example for 6-month sales:
+    "SELECT month, amount FROM sales". The user's saved colour preference is
+    applied automatically.
+
+    Args:
+        query: A read-only SELECT returning (label, value) rows.
+        title: Chart title, e.g. "Last 6 Months Sales".
+        chart_type: "bar" (default) or "line".
+    """
+    print(f"[TOOL CALLED] make_chart: {title} ({chart_type})")
+    try:
+        db._ensure_read_only(query)
+    except db.UnsafeQueryError as e:
+        return f"Query rejected (read-only): {e}"
+
+    def _do():
+        rows = db.run_select(query)
+        if not rows:
+            raise ValueError("query returned no data to chart")
+        cols = list(rows[0].keys())
+        value_col = cols[1] if len(cols) > 1 else cols[0]
+        labels = [r[cols[0]] for r in rows]
+        values = [r[value_col] for r in rows]
+        return charting.make_chart(title, labels, values, chart_type, _chart_color())
+
+    ok, out = guarded("make_chart", _do)
+    if not ok:
+        return out
+    _REQUEST_CTX.setdefault("files", []).append(
+        {"name": out["filename"], "url": f"/charts/{out['filename']}", "type": "chart"}
+    )
+    return f"Chart created: {PUBLIC_BASE_URL}/charts/{out['filename']}"
+
+
+@function_tool
+def compare_data(query_a: str, label_a: str, query_b: str, label_b: str) -> str:
+    """Compare two read-only SQL numeric results and show the change/percentage.
+
+    Each query should return a single numeric total, e.g.
+    "SELECT SUM(amount) FROM sales WHERE month='June'".
+
+    Args:
+        query_a: Read-only SELECT for the first value.
+        label_a: Human label for the first value, e.g. "June".
+        query_b: Read-only SELECT for the second value.
+        label_b: Human label for the second value, e.g. "July".
+    """
+    print(f"[TOOL CALLED] compare_data: {label_a} vs {label_b}")
+    for q in (query_a, query_b):
+        try:
+            db._ensure_read_only(q)
+        except db.UnsafeQueryError as e:
+            return f"Query rejected (read-only): {e}"
+
+    def _num(q: str) -> float:
+        rows = db.run_select(q)
+        if not rows:
+            return 0.0
+        for c in rows[0].keys():
+            try:
+                return float(sum(float(r[c] or 0) for r in rows))
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    ok, out = guarded("compare_data", lambda: (_num(query_a), _num(query_b)))
+    if not ok:
+        return out
+    a, b = out
+    diff = b - a
+    pct = (diff / a * 100) if a else 0.0
+    arrow = "increase" if diff > 0 else ("decrease" if diff < 0 else "no change")
+    return (
+        f"Comparison:\n"
+        f"- {label_a}: {a:,.0f}\n"
+        f"- {label_b}: {b:,.0f}\n"
+        f"- Difference: {diff:+,.0f} ({pct:+.1f}% {arrow})"
+    )
+
+
 sales_agent = Agent(
     name="Worker",
     instructions=(
-        "You are a worker agent executing ONE step of a larger plan. Use the "
-        "right tool for the step:\n"
-        "- Sales figures: use query_sales to read the REAL number from the "
-        "database. Never guess.\n"
-        "- Report/PDF: use generate_report, putting the real figures from "
-        "earlier steps into the body. Return the link it gives you.\n"
-        "- Email: use draft_email. It drafts the email; if the user "
-        "explicitly asked to SEND it, also set send=true — a human must "
-        "approve before anything is actually sent.\n"
-        "- Lasting user preference: use save_preference.\n"
-        "For reasoning or summarising steps, use the results of earlier steps "
-        "and the conversation context provided in the input. "
-        "Reply with only the result of this step, briefly."
+        "You are AGI-CORE's worker agent executing ONE step of a plan. You "
+        "understand English, Urdu, and Roman Urdu (Hinglish); reply in the "
+        "user's language. Pick the right tool:\n"
+        "- Any data question (sales, customers, invoices, products, expenses): "
+        "use query_database with a read-only SQL SELECT. NEVER guess numbers. "
+        "For name/text searches use LIKE with % wildcards and COLLATE NOCASE "
+        "(e.g. WHERE name LIKE '%Ahmed%' COLLATE NOCASE) so partial and "
+        "case-insensitive matches work.\n"
+        "- Excel/.xlsx export: use export_excel with a SELECT for the data.\n"
+        "- Chart/graph: use make_chart with a SELECT returning (label, value).\n"
+        "- Compare two periods/values: use compare_data.\n"
+        "- Report/PDF: use generate_report, putting REAL figures from earlier "
+        "steps into the body. Return the link it gives you.\n"
+        "- Email: use draft_email. If the user asked to SEND, set send=true — "
+        "a human must approve before anything is sent.\n"
+        "- Lasting user preference (e.g. 'graphs blue'): use save_preference "
+        "with a clear key like graph_color.\n"
+        + _SCHEMA_HINT + "\n"
+        "Format numbers with commas/currency where sensible. Reply with only "
+        "the result of this step, briefly."
     ),
     model="gpt-4o-mini",
-    tools=[query_sales, generate_report, draft_email, save_preference],
+    tools=[
+        query_database, query_sales, export_excel, make_chart, compare_data,
+        generate_report, draft_email, save_preference,
+    ],
 )
 
 
@@ -377,11 +571,13 @@ planner_agent = Agent(
         'like "that" or "it" — write steps that name the actual thing.\n'
         "- If the user states a lasting preference (\"always ...\", \"from "
         'now on ..."), include a step to save that preference.\n'
-        "- The available actions are: read sales data from the database, "
-        "generate a PDF report, draft an email (sending requires human "
-        "approval and happens after the plan), and save a preference. Plan a "
-        "data step BEFORE a report/email step that needs that data. Do not "
-        "plan steps needing any other capability (no web search)."
+        "- The available actions are: query the business database (sales, "
+        "customers, invoices, products, expenses), export data to Excel, make "
+        "a chart/graph, compare two values, generate a PDF report, draft/send "
+        "an email (sending needs human approval, after the plan), and save a "
+        "preference. Plan a DATA step BEFORE any step (chart, Excel, report, "
+        "email) that needs that data. Do not plan steps needing any other "
+        "capability (no web search)."
     ),
     model="gpt-4o-mini",
     output_type=Plan,
@@ -390,11 +586,20 @@ planner_agent = Agent(
 supervisor_agent = Agent(
     name="Supervisor",
     instructions=(
-        "You are the supervisor. You are given the user's original request, "
-        "conversation context, and the results of the plan steps that were "
-        "executed. Combine them into ONE clear, natural final reply to the "
-        "user, respecting any known user preferences. Do not mention the "
-        "plan, the steps, or other agents."
+        "You are AGI-CORE, a professional AI business assistant that helps "
+        "businesses with data analysis, reporting, and communication. You are "
+        "given the user's original request, conversation context, and the "
+        "results of the executed plan steps. Combine them into ONE clear, "
+        "natural final reply.\n"
+        "Behaviour rules:\n"
+        "- You understand English, Urdu, and Roman Urdu (Hinglish). Reply in "
+        "the SAME language the user used.\n"
+        "- Be professional but friendly; concise and actionable.\n"
+        "- Format numbers properly (commas, currency symbols where sensible).\n"
+        "- Use ONLY the data from the step results — never invent numbers.\n"
+        "- If a download link or chart was produced, mention it naturally.\n"
+        "- Respect known user preferences. Do not mention the plan, the steps, "
+        "or other agents."
     ),
     model="gpt-4o-mini",
 )
@@ -797,6 +1002,65 @@ def api_feedback_stats():
 def api_feedback_recent(limit: int = 20):
     """Phase 10: recent feedback entries."""
     return {"feedback": feedback.get_recent(limit=limit)}
+
+
+# --------------------------------------------------------------------------- #
+# Level 1 — Admin CRUD. These are WRITE endpoints for the human admin panel;
+# they deliberately bypass the agent's read-only SQL restriction (the AGENT
+# can only read; the ADMIN can write). NOTE: add authentication in production —
+# these endpoints are unauthenticated for now.
+# --------------------------------------------------------------------------- #
+class AdminRow(BaseModel):
+    data: dict
+
+
+@app.get("/api/admin/{table}")
+def admin_list_rows(table: str):
+    try:
+        return {
+            "table": table,
+            "columns": db.ADMIN_TABLES[table],
+            "key": db._admin_key(table),
+            "rows": db.admin_list(table),
+        }
+    except db.UnsafeQueryError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/admin/{table}")
+def admin_create_row(table: str, row: AdminRow):
+    try:
+        result = db.admin_insert(table, row.data)
+        print(f"[ADMIN] insert into {table}: {result}")
+        return result
+    except db.UnsafeQueryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Insert failed: {e}")
+
+
+@app.put("/api/admin/{table}/{row_id}")
+def admin_update_row(table: str, row_id: str, row: AdminRow):
+    try:
+        result = db.admin_update(table, row_id, row.data)
+        print(f"[ADMIN] update {table}#{row_id}: {result}")
+        return result
+    except db.UnsafeQueryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Update failed: {e}")
+
+
+@app.delete("/api/admin/{table}/{row_id}")
+def admin_delete_row(table: str, row_id: str):
+    try:
+        result = db.admin_delete(table, row_id)
+        print(f"[ADMIN] delete {table}#{row_id}: {result}")
+        return result
+    except db.UnsafeQueryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
 
 
 @app.post("/api/approve", response_model=ChatResponse)

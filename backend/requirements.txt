@@ -4,3 +4,5 @@ openai
 openai-agents
 python-dotenv
 fpdf2
+openpyxl
+matplotlib

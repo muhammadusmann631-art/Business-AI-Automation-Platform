@@ -269,12 +269,20 @@ export default function Home() {
             <span className="text-lg">✦</span>
             <span className="text-sm font-semibold tracking-[0.3em]">AGI · CORE</span>
           </div>
-          <a
-            href="/dashboard"
-            className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-1.5 text-xs font-medium text-emerald-300/80 transition hover:bg-emerald-500/10"
-          >
-            Dashboard →
-          </a>
+          <nav className="flex items-center gap-2">
+            <a
+              href="/dashboard"
+              className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-1.5 text-xs font-medium text-emerald-300/80 transition hover:bg-emerald-500/10"
+            >
+              Dashboard →
+            </a>
+            <a
+              href="/admin"
+              className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-1.5 text-xs font-medium text-emerald-300/80 transition hover:bg-emerald-500/10"
+            >
+              Admin →
+            </a>
+          </nav>
         </div>
       </header>
 
@@ -442,31 +450,49 @@ export default function Home() {
                 {m.content}
                 {m.files && m.files.length > 0 && (
                   <div className="mt-3 space-y-2">
-                    {m.files.map((f) => (
-                      <a
-                        key={f.url}
-                        href={`${API_URL}${f.url}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        download
-                        className="flex items-center gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2.5 transition hover:border-emerald-400/50 hover:bg-emerald-500/10"
-                      >
-                        <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15 text-lg">
-                          📄
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-xs font-semibold text-emerald-100">
-                            {f.name}
+                    {m.files.map((f) =>
+                      f.type === "chart" || f.type === "image" ? (
+                        <a
+                          key={f.url}
+                          href={`${API_URL}${f.url}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block overflow-hidden rounded-xl border border-emerald-500/25 bg-white"
+                          title="Open chart full size"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={`${API_URL}${f.url}`}
+                            alt={f.name}
+                            className="w-full"
+                          />
+                        </a>
+                      ) : (
+                        <a
+                          key={f.url}
+                          href={`${API_URL}${f.url}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          download
+                          className="flex items-center gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2.5 transition hover:border-emerald-400/50 hover:bg-emerald-500/10"
+                        >
+                          <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/15 text-lg">
+                            {f.type === "excel" ? "📊" : "📄"}
                           </span>
-                          <span className="block text-[10px] uppercase tracking-wide text-emerald-300/50">
-                            {f.type} · click to download
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-xs font-semibold text-emerald-100">
+                              {f.name}
+                            </span>
+                            <span className="block text-[10px] uppercase tracking-wide text-emerald-300/50">
+                              {f.type} · click to download
+                            </span>
                           </span>
-                        </span>
-                        <span className="rounded-lg bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-black">
-                          Download
-                        </span>
-                      </a>
-                    ))}
+                          <span className="rounded-lg bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-black">
+                            Download
+                          </span>
+                        </a>
+                      )
+                    )}
                   </div>
                 )}
                 {m.role === "assistant" && m.traceId && (

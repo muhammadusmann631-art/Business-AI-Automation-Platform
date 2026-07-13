@@ -146,6 +146,12 @@ export default function Dashboard() {
             >
               ← Chat
             </a>
+            <a
+              href="/admin"
+              className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs font-semibold text-emerald-300/80 transition hover:bg-emerald-500/10"
+            >
+              Admin →
+            </a>
             <button
               onClick={refresh}
               className="rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-3 py-2 text-xs font-semibold text-black shadow-md shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"

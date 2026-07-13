@@ -26,9 +26,12 @@ COMPLEX = "complex"
 # Anything that smells like data, documents, email, or multi-step business
 # work. Month names imply a sales/data lookup in this system.
 _COMPLEX_SIGNALS = re.compile(
-    r"(?i)\b(report|pdf|email|send|draft|sales|revenue|profit|total|data(base)?|"
-    r"sql|query|analy[sz]e|compare|export|chart|graph|summar(y|ise|ize)|"
-    r"preference|always|from now on|"
+    r"(?i)\b(report|pdf|excel|xlsx|email|send|bhej|mail|draft|sales|revenue|profit|"
+    r"total|data(base)?|sql|query|analy[sz]e|compare|export|chart|graph|"
+    r"summar(y|ise|ize)|preference|always|from now on|"
+    # business tables / entities (Level 1)
+    r"customer|client|invoice|bill|product|stock|inventory|expense|kharch|"
+    r"overdue|pending|paid|revenue|"
     r"january|february|march|april|may|june|july|august|september|october|"
     r"november|december|force_fail)\b"
 )
