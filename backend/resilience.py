@@ -17,7 +17,7 @@ blocking backoff is enough to prove the pattern.
 import time
 
 DEFAULT_MAX_RETRIES = 3          # 1 initial try + 3 retries = 4 attempts total
-DEFAULT_BASE_DELAY = 1.0         # seconds; doubles each retry (1 -> 2 -> 4)
+DEFAULT_BASE_DELAY = 1.0   # seconds; doubles each retry (1 -> 2 -> 4)
 
 # Swappable so tests don't actually sleep. Referenced as a module global at
 # call time, so reassigning resilience._sleep in a test takes effect.
