@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { authFetch, getToken } from "../lib/api";
 
 // Relative — Next.js rewrites proxy these to the backend (see next.config.ts).
 const API_URL = "";
@@ -19,11 +21,16 @@ export default function Admin() {
   const [isNew, setIsNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!getToken()) router.replace("/login");
+  }, [router]);
 
   const load = useCallback(async (t: Table) => {
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/api/admin/${t}`);
+      const res = await authFetch(`${API_URL}/api/admin/${t}`);
       const data = await res.json();
       setColumns(data.columns ?? []);
       setKeyCol(data.key ?? "id");
@@ -62,7 +69,7 @@ export default function Admin() {
       const url = isNew
         ? `${API_URL}/api/admin/${table}`
         : `${API_URL}/api/admin/${table}/${editing[keyCol]}`;
-      const res = await fetch(url, {
+      const res = await authFetch(url, {
         method: isNew ? "POST" : "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data: payload }),
@@ -85,7 +92,7 @@ export default function Admin() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`${API_URL}/api/admin/${table}/${row[keyCol]}`, {
+      const res = await authFetch(`${API_URL}/api/admin/${table}/${row[keyCol]}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error("Delete failed");

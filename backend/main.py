@@ -14,12 +14,14 @@ except Exception:
 
 from agents import Agent, Runner, function_tool
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import approval
+import auth
 import charting
 import database as db
 import dead_letter
@@ -29,6 +31,7 @@ import qa
 import resilience
 import router
 import tracer
+import whatsapp
 from charting import CHARTS_DIR
 from emailing import draft_email as draft_email_impl, send_email as send_email_impl
 from exporting import EXPORTS_DIR
@@ -37,7 +40,7 @@ from reporting import REPORTS_DIR, generate_report as generate_report_impl
 
 load_dotenv()
 
-app = FastAPI(title="AI Agent System — Level 1 (business)")
+app = FastAPI(title="AI Agent System — Auth + WhatsApp")
 
 short_term = ShortTermMemory()
 preferences = PreferenceStore(Path(__file__).parent / "preferences.json")
@@ -52,6 +55,9 @@ tracer.init()
 
 # Phase 10: initialise the feedback store (feedback.db). Safe/idempotent.
 feedback.init()
+
+# Auth: seed the default admin user once (idempotent).
+auth.ensure_admin()
 
 # Phase 10: last completed trace per session, so an inline correction ("no,
 # that's wrong...") can be linked to the response it is correcting.
@@ -70,6 +76,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --------------------------------------------------------------------------- #
+# Auth middleware — protect every /api/* route except the public ones. A valid
+# `Authorization: Bearer <jwt>` is required; otherwise 401. Static files and
+# the auth/whatsapp/health endpoints stay public.
+# --------------------------------------------------------------------------- #
+_PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/docs/oauth2-redirect"}
+_PUBLIC_PREFIXES = ("/api/auth/", "/reports/", "/exports/", "/charts/")
+_PUBLIC_EXACT = {"/api/whatsapp"}  # Twilio webhook — validated by signature, not JWT
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    request.state.user = auth.current_user(request.headers.get("authorization"))
+
+    is_public = (
+        request.method == "OPTIONS"
+        or not path.startswith("/api/")
+        or path in _PUBLIC_PATHS
+        or path in _PUBLIC_EXACT
+        or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+    )
+    if not is_public and request.state.user is None:
+        return JSONResponse(
+            status_code=401, content={"detail": "Not authenticated. Please log in."}
+        )
+    return await call_next(request)
+
 
 # Serve generated artifacts so the reply can link to / render them.
 REPORTS_DIR.mkdir(exist_ok=True)
@@ -170,14 +205,23 @@ def _maybe_inject_fault(tool_name: str) -> None:
     # recover mode with no remaining failures -> fall through and succeed.
 
 
-def guarded(tool_name: str, fn):
+def guarded(tool_name: str, fn, dedup_key: str | None = None):
     """Run a tool's real work with retry + backoff, dead-lettering on exhaustion.
 
     Returns ``(True, result)`` on success or ``(False, user_message)`` on
     failure. Every unrecovered failure is recorded on the request context so
     the Phase 5 QA layer can flag it to the user.
+
+    ``dedup_key`` (Part 1 fix): if the SAME tool+args ran already this request,
+    return the cached result instead of running again — a safety net so a
+    double-calling LLM never produces duplicate charts/PDFs/Excels/emails.
     """
     tid = _REQUEST_CTX.get("trace_id")
+
+    calls: dict = _REQUEST_CTX.setdefault("tool_calls", {})
+    if dedup_key is not None and dedup_key in calls:
+        print(f"[DEDUP] skipping duplicate call: {tool_name}")
+        return True, calls[dedup_key]
 
     def _do():
         _maybe_inject_fault(tool_name)
@@ -192,6 +236,8 @@ def guarded(tool_name: str, fn):
         try:
             result = resilience.call_with_retry(_do, tool_name=tool_name, on_retry=_on_retry)
             sp["output"] = result
+            if dedup_key is not None:
+                calls[dedup_key] = result  # cache for the dedup safety net
             return True, result
         except resilience.RetryExhausted as e:
             # Transient failure survived all retries -> save it, alert, flag it.
@@ -254,7 +300,8 @@ def generate_report(title: str, body: str) -> str:
         title: Report title, e.g. "June Sales Report".
         body: The full report text/summary to place in the PDF.
     """
-    ok, out = guarded("generate_report", lambda: generate_report_impl(title, body))
+    ok, out = guarded("generate_report", lambda: generate_report_impl(title, body),
+                      dedup_key=f"generate_report:{title}:{body[:120]}")
     if not ok:
         return out
     result = out
@@ -284,7 +331,8 @@ def draft_email(to: str, subject: str, body: str, attachment: str = "", send: bo
         attachment: Optional report filename/link to reference.
         send: True ONLY if the user explicitly asked to send (not just draft).
     """
-    ok, out = guarded("draft_email", lambda: draft_email_impl(to, subject, body, attachment))
+    ok, out = guarded("draft_email", lambda: draft_email_impl(to, subject, body, attachment),
+                      dedup_key=f"draft_email:{to}:{subject}")
     if not ok:
         return out
     draft = out
@@ -403,7 +451,7 @@ def query_database(sql: str) -> str:
         db._ensure_read_only(sql)
     except db.UnsafeQueryError as e:
         return f"Query rejected (read-only): {e}"
-    ok, out = guarded("query_database", lambda: db.run_select(sql))
+    ok, out = guarded("query_database", lambda: db.run_select(sql), dedup_key=f"query_database:{sql}")
     if not ok:
         return out
     return _format_rows(out)
@@ -430,7 +478,7 @@ def export_excel(query: str, title: str) -> str:
         rows = db.run_select(query)
         return exporting.export_rows(title, rows)
 
-    ok, out = guarded("export_excel", _do)
+    ok, out = guarded("export_excel", _do, dedup_key=f"export_excel:{title}:{query}")
     if not ok:
         return out
     _REQUEST_CTX.setdefault("files", []).append(
@@ -469,7 +517,7 @@ def make_chart(query: str, title: str, chart_type: str = "bar") -> str:
         values = [r[value_col] for r in rows]
         return charting.make_chart(title, labels, values, chart_type, _chart_color())
 
-    ok, out = guarded("make_chart", _do)
+    ok, out = guarded("make_chart", _do, dedup_key=f"make_chart:{title}:{query}:{chart_type}")
     if not ok:
         return out
     _REQUEST_CTX.setdefault("files", []).append(
@@ -545,6 +593,10 @@ sales_agent = Agent(
         "- Lasting user preference (e.g. 'graphs blue'): use save_preference "
         "with a clear key like graph_color.\n"
         + _SCHEMA_HINT + "\n"
+        "IMPORTANT: Call each tool ONLY ONCE per step. Never call the same "
+        "tool twice with the same or similar parameters. Once you have a "
+        "tool's result, USE it — do not call the tool again. One chart, one "
+        "PDF, one Excel, one email draft per request.\n"
         "Format numbers with commas/currency where sensible. Reply with only "
         "the result of this step, briefly."
     ),
@@ -578,7 +630,9 @@ planner_agent = Agent(
         "an email (sending needs human approval, after the plan), and save a "
         "preference. Plan a DATA step BEFORE any step (chart, Excel, report, "
         "email) that needs that data. Do not plan steps needing any other "
-        "capability (no web search)."
+        "capability (no web search).\n"
+        "- NEVER create duplicate steps. Each tool/action appears AT MOST "
+        "ONCE (never two chart steps or two PDF steps). Max 2-4 steps."
     ),
     model="gpt-4o-mini",
     output_type=Plan,
@@ -848,6 +902,7 @@ async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, s
     _REQUEST_CTX["tokens"] = 0
     _REQUEST_CTX["files"] = []                                   # Polish Fix 1
     _REQUEST_CTX["send_intent"] = _detect_send_intent(message)   # Polish Fix 2
+    _REQUEST_CTX["tool_calls"] = {}                              # Part 1: dedup cache
     route, status, reply, pending = "complex", "success", "", None
     try:
         history = short_term.history(session_id)
@@ -872,7 +927,14 @@ async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, s
             sp["status"] = "delivered"
         if tid:
             _LAST_TRACE[session_id] = tid  # for a future inline correction
-        return reply, pending, tid, list(_REQUEST_CTX.get("files", []))
+        # Part 1 Fix D: dedup the files array by url (belt-and-suspenders).
+        seen_urls: set[str] = set()
+        unique_files = []
+        for f in _REQUEST_CTX.get("files", []):
+            if f["url"] not in seen_urls:
+                seen_urls.add(f["url"])
+                unique_files.append(f)
+        return reply, pending, tid, unique_files
     except Exception:
         status = "error"
         raise
@@ -896,20 +958,69 @@ class ApprovalRequest(BaseModel):
     approval_id: str
 
 
+class SignupRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
+# ------------------------------- Auth endpoints ---------------------------- #
+@app.post("/api/auth/signup")
+def api_signup(req: SignupRequest):
+    try:
+        user = auth.signup(req.name, req.email, req.password)
+        print(f"[AUTH] signup: {user['email']}")
+        return {"user": user}
+    except auth.AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Signup failed: {e}")
+
+
+@app.post("/api/auth/login")
+def api_login(req: LoginRequest):
+    try:
+        token, user = auth.login(req.email, req.password)
+        print(f"[AUTH] login: {user['email']}")
+        return {"token": token, "user": user}
+    except auth.AuthError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+
+@app.get("/api/auth/me")
+def api_me(request: Request):
+    u = getattr(request.state, "user", None)
+    if not u:
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    return {"user": {"id": u["sub"], "name": u["name"], "email": u["email"], "role": u["role"]}}
+
+
+def _user_session(request: Request, session_id: str) -> str:
+    """Isolate memory per authenticated user (Phase 3 memory becomes per-user)."""
+    u = getattr(request.state, "user", None)
+    return f"u{u['sub']}:{session_id}" if u else session_id
+
+
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(
             status_code=500,
             detail="OPENAI_API_KEY is not set. Add it to backend/.env",
         )
     try:
-        reply, pending, trace_id, files = await run_routed(req.message, req.session_id)
+        sid = _user_session(request, req.session_id)
+        reply, pending, trace_id, files = await run_routed(req.message, sid)
         return ChatResponse(reply=reply, pending_approval=pending, trace_id=trace_id, files=files)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent run failed: {e}")
@@ -1062,6 +1173,76 @@ def admin_delete_row(table: str, row_id: str):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# WhatsApp channel (Twilio). Public endpoint — validated by Twilio signature,
+# not JWT. Runs incoming messages through the SAME pipeline as web chat.
+# --------------------------------------------------------------------------- #
+_WA_PENDING: dict[str, str] = {}  # phone -> approval_id awaiting APPROVE/REJECT
+
+
+@app.post("/api/whatsapp")
+async def whatsapp_webhook(request: Request):
+    # Parse Twilio's urlencoded body without needing python-multipart.
+    from urllib.parse import parse_qs
+
+    raw = (await request.body()).decode("utf-8", "replace")
+    params = {k: v[0] for k, v in parse_qs(raw).items()}
+
+    # Security: verify the request genuinely came from Twilio.
+    if not whatsapp.validate_signature(
+        str(request.url), params, request.headers.get("X-Twilio-Signature")
+    ):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature.")
+
+    if not whatsapp.is_configured():
+        return JSONResponse(
+            {"detail": "WhatsApp not configured. Set TWILIO_ACCOUNT_SID, "
+                       "TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_NUMBER in .env"}
+        )
+
+    from_number = params.get("From", "").replace("whatsapp:", "").strip()
+    body = (params.get("Body") or "").strip()
+    if not from_number or not body:
+        return JSONResponse({"ok": True})
+
+    print(f"[WHATSAPP] incoming from {from_number}: {body[:60]}")
+    session = f"wa:{from_number}"
+
+    try:
+        # Approval decision via text?
+        decision = body.strip().upper()
+        if decision in ("APPROVE", "REJECT") and _WA_PENDING.get(from_number):
+            aid = _WA_PENDING.pop(from_number)
+            try:
+                if decision == "APPROVE":
+                    result = approval.approve(aid)
+                else:
+                    entry = approval.reject(aid)
+                    result = f"Cancelled — the {entry.action.replace('_', ' ')} was not executed."
+            except approval.ApprovalNotFound:
+                result = "That request has expired or was already handled."
+            whatsapp.send_reply(from_number, whatsapp.to_plain(result))
+            return JSONResponse({"ok": True})
+
+        # Normal message -> same pipeline as web chat.
+        reply, pending, _trace_id, files = await run_routed(body, session)
+        text = whatsapp.to_plain(reply)
+        for f in files:  # WhatsApp: send file links (public URL)
+            text += f"\n\n{f['type'].upper()}: {PUBLIC_BASE_URL}{f['url']}"
+        if pending:
+            _WA_PENDING[from_number] = pending["approval_id"]
+            d = pending.get("details", {})
+            text += (
+                f"\n\n[APPROVAL NEEDED] Send email to {d.get('to', '')}?\n"
+                "Reply APPROVE to send, or REJECT to cancel."
+            )
+        whatsapp.send_reply(from_number, text)
+    except Exception as e:
+        print(f"[WHATSAPP] processing error: {e}")
+        whatsapp.send_reply(from_number, "Sorry, something went wrong. Please try again.")
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/approve", response_model=ChatResponse)

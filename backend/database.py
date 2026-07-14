@@ -124,7 +124,51 @@ CREATE TABLE IF NOT EXISTS expenses (
     date DATE NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT DEFAULT 'user',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
+
+
+# --- User helpers (auth). Privileged read-write, NOT the agent's tool path. ---
+def create_user(name: str, email: str, password_hash: str, role: str = "user") -> int:
+    conn = sqlite3.connect(_db_path())
+    try:
+        cur = conn.execute(
+            "INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)",
+            (name, email.strip().lower(), password_hash, role),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_user_by_email(email: str) -> dict | None:
+    conn = sqlite3.connect(_db_path())
+    try:
+        conn.row_factory = sqlite3.Row
+        r = conn.execute(
+            "SELECT * FROM users WHERE email = ?", (email.strip().lower(),)
+        ).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def get_user_by_id(user_id) -> dict | None:
+    conn = sqlite3.connect(_db_path())
+    try:
+        conn.row_factory = sqlite3.Row
+        r = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
 
 
 def seed() -> None:

@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { authFetch, getToken } from "../lib/api";
 
 // Relative — Next.js rewrites proxy these to the backend (see next.config.ts).
 const API_URL = "";
@@ -81,14 +83,19 @@ export default function Dashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [fbStats, setFbStats] = useState<FeedbackStats | null>(null);
   const [fbRecent, setFbRecent] = useState<FeedbackEntry[]>([]);
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!getToken()) router.replace("/login");
+  }, [router]);
 
   const refresh = useCallback(async () => {
     try {
       const [s, t, fs, fr] = await Promise.all([
-        fetch(`${API_URL}/api/stats`).then((r) => r.json()),
-        fetch(`${API_URL}/api/traces?limit=50`).then((r) => r.json()),
-        fetch(`${API_URL}/api/feedback/stats`).then((r) => r.json()),
-        fetch(`${API_URL}/api/feedback/recent?limit=20`).then((r) => r.json()),
+        authFetch(`${API_URL}/api/stats`).then((r) => r.json()),
+        authFetch(`${API_URL}/api/traces?limit=50`).then((r) => r.json()),
+        authFetch(`${API_URL}/api/feedback/stats`).then((r) => r.json()),
+        authFetch(`${API_URL}/api/feedback/recent?limit=20`).then((r) => r.json()),
       ]);
       setStats(s);
       setTraces(t.traces ?? []);
@@ -114,7 +121,7 @@ export default function Dashboard() {
     setExpanded(traceId);
     if (!spans[traceId]) {
       try {
-        const full = await fetch(`${API_URL}/api/traces/${traceId}`).then((r) => r.json());
+        const full = await authFetch(`${API_URL}/api/traces/${traceId}`).then((r) => r.json());
         setSpans((prev) => ({ ...prev, [traceId]: full.spans ?? [] }));
       } catch {
         setSpans((prev) => ({ ...prev, [traceId]: [] }));

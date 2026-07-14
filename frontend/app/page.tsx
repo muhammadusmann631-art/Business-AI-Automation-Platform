@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { authFetch, getToken, getUser, logout, type User } from "./lib/api";
 
 // Relative — Next.js rewrites (next.config.ts) proxy these to the backend, so
 // the app works from a single URL both locally and on Render.
@@ -87,6 +89,17 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const sessionIdRef = useRef<string>("");
   const pulseId = useRef(0);
+  const router = useRouter();
+  const [user, setUser] = useState<User | null>(null);
+
+  // Auth guard: no token -> go to login.
+  useEffect(() => {
+    if (!getToken()) {
+      router.replace("/login");
+      return;
+    }
+    setUser(getUser());
+  }, [router]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -152,7 +165,7 @@ export default function Home() {
     setActiveNode("router"); // core starts "thinking"
 
     try {
-      const res = await fetch(`${API_URL}/api/chat`, {
+      const res = await authFetch(`${API_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, session_id: sessionIdRef.current }),
@@ -204,7 +217,7 @@ export default function Home() {
     if (decision === "approved") spawnPulse("core", "email", "#f5b301");
     try {
       const endpoint = decision === "approved" ? "approve" : "reject";
-      const res = await fetch(`${API_URL}/api/${endpoint}`, {
+      const res = await authFetch(`${API_URL}/api/${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ approval_id: msg.pending.approval_id }),
@@ -284,6 +297,15 @@ export default function Home() {
             >
               Admin →
             </a>
+            {user && (
+              <span className="ml-1 hidden text-xs text-emerald-200/50 sm:inline">{user.name}</span>
+            )}
+            <button
+              onClick={logout}
+              className="rounded-lg border border-rose-400/25 bg-rose-500/5 px-3 py-1.5 text-xs font-medium text-rose-300/80 transition hover:bg-rose-500/10"
+            >
+              Logout
+            </button>
           </nav>
         </div>
       </header>

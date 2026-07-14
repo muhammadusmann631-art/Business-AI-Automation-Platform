@@ -6,3 +6,6 @@ python-dotenv
 fpdf2
 openpyxl
 matplotlib
+bcrypt
+PyJWT
+twilio
