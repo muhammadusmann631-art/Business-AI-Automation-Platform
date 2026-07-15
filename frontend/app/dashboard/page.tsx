@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { authFetch, getToken } from "../lib/api";
 import BusinessOverview, { type BusinessStats } from "../components/BusinessOverview";
+import AlertsBanner from "../components/AlertsBanner";
 
 // Relative — Next.js rewrites proxy these to the backend (see next.config.ts).
 const API_URL = "";
@@ -175,6 +176,9 @@ export default function Dashboard() {
       </header>
 
       <div className="mx-auto max-w-5xl px-4 py-6">
+        {/* Smart alerts */}
+        <AlertsBanner />
+
         {/* Business Overview (live charts) */}
         <BusinessOverview stats={biz} />
 

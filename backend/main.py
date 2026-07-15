@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import alerts as alerts_engine
 import approval
 import auth
 import charting
@@ -28,6 +29,7 @@ import dead_letter
 import exporting
 import feedback
 import importer
+import pnl as pnl_mod
 import qa
 import resilience
 import router
@@ -132,6 +134,7 @@ _REQUEST_CTX: dict = {
     "tokens": 0,         # Phase 9: accumulated approximate token count
     "files": [],         # Polish: downloadable files (PDFs) produced this request
     "send_intent": False, # Polish: user explicitly asked to SEND an email
+    "alert_note": "",    # Batch 2: active-alert note injected on first message
 }
 
 
@@ -600,6 +603,24 @@ def compare_data(query_a: str, label_a: str, query_b: str, label_b: str) -> str:
     )
 
 
+@function_tool
+def calculate_pnl(period: str = "current_month") -> str:
+    """Calculate Profit & Loss (revenue - expenses) for a period, with a
+    comparison to the previous period. Use this for profit/loss/P&L/financial-
+    summary/"kitna kamaya" questions. Deterministic — no guessing.
+
+    Args:
+        period: "current_month", "last_month", a month name ("June"), a
+            quarter ("Q1"-"Q4"), or "this_year".
+    """
+    ok, out = guarded("calculate_pnl", lambda: pnl_mod.calculate_pnl(period),
+                      dedup_key=f"calculate_pnl:{period}")
+    if not ok:
+        return out
+    print(f"[TOOL CALLED] calculate_pnl({out['period']}) -> {out['status']} ${out['net']:,.0f}")
+    return pnl_mod.format_pnl(out)
+
+
 sales_agent = Agent(
     name="Worker",
     instructions=(
@@ -614,6 +635,9 @@ sales_agent = Agent(
         "- Excel/.xlsx export: use export_excel with a SELECT for the data.\n"
         "- Chart/graph: use make_chart with a SELECT returning (label, value).\n"
         "- Compare two periods/values: use compare_data.\n"
+        "- Profit/Loss/P&L/financial summary/'kitna kamaya': use calculate_pnl "
+        "with the period. Present revenue, expense breakdown, net profit/loss, "
+        "and the comparison clearly. Do NOT make a PDF/chart unless asked.\n"
         "- Report/PDF: use generate_report, putting REAL figures from earlier "
         "steps into the body. Return the link it gives you.\n"
         "- Email: use draft_email. If the user asked to SEND, set send=true — "
@@ -635,7 +659,7 @@ sales_agent = Agent(
     model="gpt-4o-mini",
     tools=[
         query_database, query_sales, export_excel, make_chart, compare_data,
-        generate_report, draft_email, save_preference,
+        calculate_pnl, generate_report, draft_email, save_preference,
     ],
 )
 
@@ -674,10 +698,13 @@ planner_agent = Agent(
         "- If the user states a lasting preference (\"always ...\", \"from "
         'now on ..."), include a step to save that preference.\n'
         "- The available actions are: query the business database (sales, "
-        "customers, invoices, products, expenses), export data to Excel, make "
-        "a chart/graph, compare two values, generate a PDF report, draft/send "
-        "an email (sending needs human approval, after the plan), and save a "
-        "preference. Plan a DATA step BEFORE any step (chart, Excel, report, "
+        "customers, invoices, products, expenses), calculate Profit & Loss "
+        "(P&L), export data to Excel, make a chart/graph, compare two values, "
+        "generate a PDF report, draft/send an email (sending needs human "
+        "approval, after the plan), and save a preference. For a P&L/profit/"
+        "loss/financial-summary request, plan ONE 'calculate P&L' step (plus a "
+        "reply step) — NO chart/PDF/Excel unless asked. Plan a DATA step "
+        "BEFORE any step (chart, Excel, report, "
         "email) that needs that data. Do not plan steps needing any other "
         "capability (no web search).\n"
         "- NEVER create duplicate steps. Each tool/action appears AT MOST "
@@ -742,6 +769,9 @@ def build_memory_context(session_id: str) -> str:
         for turn in history[-6:]:
             lines.append(f"User: {turn['user']}")
             lines.append(f"Assistant: {turn['assistant']}")
+    note = _REQUEST_CTX.get("alert_note")
+    if note:
+        lines.append(note)  # Batch 2: proactive alerts on first message
     return "\n".join(lines)
 
 
@@ -957,6 +987,21 @@ async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, s
     _REQUEST_CTX["send_intent"] = _detect_send_intent(message)   # Polish Fix 2
     _REQUEST_CTX["tool_calls"] = {}                              # Part 1: dedup cache
     _REQUEST_CTX["allowed_tools"] = None                         # Precise Fix 4: plan gate
+
+    # Batch 2: on the FIRST message of a session, surface active alerts to the
+    # agent so it can proactively mention them.
+    _REQUEST_CTX["alert_note"] = ""
+    if len(short_term.history(session_id)) == 0:
+        try:
+            summary = alerts_engine.alert_summary_text()
+            if summary:
+                n = summary.count("\n") + 1
+                _REQUEST_CTX["alert_note"] = (
+                    f"There are {n} active business alerts. Mention them to the user "
+                    f"if they are relevant to the request:\n{summary}"
+                )
+        except Exception as e:
+            print(f"[ALERTS] chat inject failed: {e}")
     route, status, reply, pending = "complex", "success", "", None
     try:
         history = short_term.history(session_id)
@@ -1304,13 +1349,34 @@ def business_stats():
     }
     summary["net_profit"] = (summary["total_revenue"] or 0) - (summary["total_expenses"] or 0)
 
+    try:
+        pnl_card = pnl_mod.calculate_pnl("current_month")
+    except Exception as e:
+        print(f"[STATS] pnl failed: {e}")
+        pnl_card = None
+
     return {
         "revenue_trend": revenue,
         "expense_breakdown": expenses,
         "top_customers": top_customers,
         "invoice_status": invoice_status,
         "summary": summary,
+        "pnl": pnl_card,
     }
+
+
+# ------------------------------- Smart alerts ------------------------------ #
+@app.get("/api/alerts")
+def api_alerts():
+    """Current business alerts (cached 5 min, dismissed ones excluded)."""
+    return {"alerts": alerts_engine.get_alerts()}
+
+
+@app.post("/api/alerts/dismiss/{alert_id}")
+def api_dismiss_alert(alert_id: str):
+    alerts_engine.dismiss(alert_id)
+    print(f"[ALERTS] dismissed {alert_id}")
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- #

@@ -29,6 +29,14 @@ export type BusinessStats = {
     pending_invoices: number;
     overdue_invoices: number;
   };
+  pnl?: {
+    period: string;
+    revenue: number;
+    expenses: { total: number };
+    net: number;
+    status: "PROFIT" | "LOSS";
+    comparison: { previous_period: string; change_percent: number; trend: string };
+  } | null;
 };
 
 const GREENS = ["#10b981", "#14b8a6", "#059669", "#0d9488", "#34d399", "#2dd4bf"];
@@ -89,6 +97,34 @@ export default function BusinessOverview({ stats }: { stats: BusinessStats | nul
       <h2 className="mb-3 flex items-center gap-2 text-sm font-bold text-emerald-200">
         <span>📊</span> Business Overview
       </h2>
+
+      {stats.pnl && (
+        <div
+          className={`mb-3 flex flex-wrap items-center gap-x-8 gap-y-2 rounded-2xl border bg-emerald-500/[0.05] px-5 py-4 ${
+            stats.pnl.status === "PROFIT" ? "border-emerald-500/30" : "border-rose-500/30"
+          }`}
+        >
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-200/40">
+              {stats.pnl.period} · P&amp;L
+            </p>
+            <p className={`text-2xl font-bold ${stats.pnl.status === "PROFIT" ? "text-emerald-300" : "text-rose-300"}`}>
+              {stats.pnl.net < 0 ? "-" : ""}${Math.abs(stats.pnl.net).toLocaleString()}{" "}
+              <span className="text-sm">{stats.pnl.status === "PROFIT" ? "profit" : "loss"}</span>
+            </p>
+          </div>
+          <div className="text-xs text-emerald-200/60">
+            <p>Revenue: <span className="text-emerald-200">{money(stats.pnl.revenue)}</span></p>
+            <p>Expenses: <span className="text-amber-200">{money(stats.pnl.expenses.total)}</span></p>
+          </div>
+          {stats.pnl.comparison.change_percent !== 0 && (
+            <div className={`text-xs ${stats.pnl.comparison.trend === "UP" ? "text-emerald-300" : "text-rose-300"}`}>
+              {stats.pnl.comparison.trend === "UP" ? "↑" : "↓"}{" "}
+              {Math.abs(stats.pnl.comparison.change_percent)}% vs {stats.pnl.comparison.previous_period}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <Panel title="Revenue Trend" empty={stats.revenue_trend.length === 0}>
