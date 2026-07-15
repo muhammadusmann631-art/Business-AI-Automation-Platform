@@ -1,11 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { authFetch, getToken } from "../lib/api";
 
 // Relative — Next.js rewrites proxy these to the backend (see next.config.ts).
 const API_URL = "";
+
+type ImportPreview = {
+  filename: string;
+  total_rows: number;
+  mapping: Record<string, string>;
+  columns: string[];
+  preview: Record<string, string | number>[];
+  errors: string[];
+};
+
+type ImportResult = { imported: number; skipped: number; errors: string[]; filename: string };
 
 const TABLES = ["customers", "invoices", "products", "expenses", "sales"] as const;
 type Table = (typeof TABLES)[number];
@@ -23,9 +34,63 @@ export default function Admin() {
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
+  // CSV/Excel import state
+  const fileRef = useRef<HTMLInputElement>(null);
+  const pendingFile = useRef<File | null>(null);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+
   useEffect(() => {
     if (!getToken()) router.replace("/login");
   }, [router]);
+
+  async function onFilePicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) return setError("File too large (max 5 MB).");
+    pendingFile.current = file;
+    setError(null);
+    setImportResult(null);
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await authFetch(`${API_URL}/api/admin/preview-import/${table}`, {
+        method: "POST",
+        body: fd,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Preview failed");
+      setPreview(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Preview failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmImport() {
+    if (!pendingFile.current) return;
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", pendingFile.current);
+      const res = await authFetch(`${API_URL}/api/admin/import/${table}`, {
+        method: "POST",
+        body: fd,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Import failed");
+      setImportResult(data);
+      setPreview(null);
+      await load(table);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const load = useCallback(async (t: Table) => {
     setError(null);
@@ -153,13 +218,99 @@ export default function Admin() {
               {t}
             </button>
           ))}
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,.xlsx,.xls"
+            onChange={onFilePicked}
+            className="hidden"
+          />
+          <button
+            onClick={() => fileRef.current?.click()}
+            disabled={busy}
+            className="ml-auto rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-2 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-500/15 active:scale-95 disabled:opacity-40"
+          >
+            📥 Import CSV/Excel
+          </button>
           <button
             onClick={startNew}
-            className="ml-auto rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-4 py-2 text-xs font-semibold text-black shadow-md shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"
+            className="rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-4 py-2 text-xs font-semibold text-black shadow-md shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"
           >
             + Add New
           </button>
         </div>
+
+        {importResult && (
+          <div className="mb-3 rounded-xl border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+            ✅ {importResult.imported} rows imported, {importResult.skipped} skipped
+            {importResult.errors.length > 0 && (
+              <ul className="mt-1 list-disc pl-4 text-amber-300/80">
+                {importResult.errors.slice(0, 5).map((er, i) => (
+                  <li key={i}>{er}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {/* Import preview modal */}
+        {preview && (
+          <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
+            <div className="max-h-[85vh] w-full max-w-2xl overflow-auto rounded-2xl border border-emerald-500/25 bg-[#070c0a] p-5">
+              <h3 className="mb-1 text-sm font-bold text-emerald-200">
+                Import into {table}
+              </h3>
+              <p className="mb-3 text-xs text-emerald-200/50">
+                {preview.filename} · {preview.total_rows} rows · mapped columns:{" "}
+                {preview.columns.join(", ") || "none"}
+              </p>
+              {preview.errors.length > 0 && (
+                <ul className="mb-3 list-disc rounded-lg border border-amber-400/30 bg-amber-500/10 py-2 pl-6 text-xs text-amber-300">
+                  {preview.errors.map((er, i) => (
+                    <li key={i}>{er}</li>
+                  ))}
+                </ul>
+              )}
+              <div className="overflow-x-auto rounded-lg border border-emerald-500/15">
+                <table className="w-full text-left text-xs">
+                  <thead className="border-b border-emerald-500/15 text-emerald-300/60">
+                    <tr>
+                      {preview.columns.map((c) => (
+                        <th key={c} className="px-2 py-1.5 capitalize">{c}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.preview.map((row, i) => (
+                      <tr key={i} className="border-b border-emerald-500/[0.07]">
+                        {preview.columns.map((c) => (
+                          <td key={c} className="px-2 py-1.5 text-emerald-50/80">
+                            {String(row[c] ?? "")}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-4 flex gap-2">
+                <button
+                  onClick={confirmImport}
+                  disabled={busy || preview.columns.length === 0}
+                  className="rounded-lg bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition hover:bg-emerald-400 disabled:opacity-40"
+                >
+                  {busy ? "Importing…" : "Confirm Import"}
+                </button>
+                <button
+                  onClick={() => setPreview(null)}
+                  className="rounded-lg border border-emerald-500/20 px-4 py-2 text-xs font-semibold text-emerald-300/70 transition hover:bg-emerald-500/10"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {error && (
           <p className="mb-3 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">

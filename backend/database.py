@@ -418,5 +418,59 @@ def admin_delete(table: str, row_id) -> dict:
         conn.close()
 
 
+# Natural "already exists" key per table, used to skip duplicate imports.
+_IMPORT_DEDUP_KEY = {
+    "customers": "email",
+    "products": "name",
+    "invoices": "invoice_number",
+    "sales": "month",
+    "expenses": None,  # no natural key — content dupes are allowed
+}
+
+
+def import_rows(table: str, rows: list[dict]) -> dict:
+    """Bulk-insert mapped rows, skipping duplicates. Returns import counts.
+
+    Duplicate detection: a per-table natural key (email/name/invoice_number/
+    month) plus INSERT OR IGNORE for PK/UNIQUE columns. Never overwrites.
+    """
+    _check_table(table)
+    cols = ADMIN_TABLES[table]
+    key = _IMPORT_DEDUP_KEY.get(table)
+    imported = skipped = 0
+    errors: list[str] = []
+
+    conn = sqlite3.connect(_db_path())
+    try:
+        for i, row in enumerate(rows, 1):
+            data = {c: row[c] for c in cols if c in row and row[c] not in (None, "")}
+            if not data:
+                errors.append(f"Row {i}: no recognisable columns")
+                continue
+            try:
+                if key and data.get(key) is not None:
+                    exists = conn.execute(
+                        f"SELECT 1 FROM {table} WHERE {key}=? LIMIT 1", (data[key],)
+                    ).fetchone()
+                    if exists:
+                        skipped += 1
+                        continue
+                placeholders = ", ".join("?" for _ in data)
+                cur = conn.execute(
+                    f"INSERT OR IGNORE INTO {table} ({', '.join(data)}) VALUES ({placeholders})",
+                    tuple(data.values()),
+                )
+                if cur.rowcount:
+                    imported += 1
+                else:
+                    skipped += 1  # ignored by a UNIQUE/PK constraint
+            except Exception as e:
+                errors.append(f"Row {i}: {e}")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"imported": imported, "skipped": skipped, "errors": errors}
+
+
 if __name__ == "__main__":
     seed()

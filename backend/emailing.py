@@ -41,6 +41,31 @@ def draft_email(to: str, subject: str, body: str, attachment: str = "") -> dict:
     return draft
 
 
+def format_email_body_html(subject: str, body_text: str) -> str:
+    """Wrap a plain-text body in clean, branded HTML for professional emails."""
+    import html
+
+    safe_subject = html.escape(subject or "")
+    safe_body = html.escape(body_text or "").replace("\n", "<br>")
+    return f"""\
+<html>
+<head>
+<style>
+  body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; margin: 0; }}
+  .header {{ background-color: #0f172a; color: #10b981; padding: 20px; text-align: center; }}
+  .header h2 {{ margin: 0; }}
+  .content {{ padding: 24px; font-size: 15px; }}
+  .footer {{ background-color: #f1f5f9; padding: 15px; text-align: center; font-size: 12px; color: #666; }}
+</style>
+</head>
+<body>
+  <div class="header"><h2>{safe_subject}</h2></div>
+  <div class="content">{safe_body}</div>
+  <div class="footer">Sent via AGI-CORE Business Assistant</div>
+</body>
+</html>"""
+
+
 def send_email(to: str, subject: str, body: str, attachment: str = "") -> str:
     """REALLY send an email via SMTP. Call ONLY from the approval handler.
 
@@ -64,16 +89,19 @@ def send_email(to: str, subject: str, body: str, attachment: str = "") -> str:
     if not sender or "@" not in sender or "your-email@" in sender:
         sender = user
 
+    text = body
+    if attachment:
+        # Keep it light: reference the report link/path in the body rather
+        # than MIME-attaching files.
+        text += f"\n\nAttachment: {attachment}"
+
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = to
     msg["Subject"] = subject
-    text = body
-    if attachment:
-        # Phase 7 keeps it light: reference the report link/path in the body
-        # rather than MIME-attaching files.
-        text += f"\n\nAttachment: {attachment}"
+    # Send clean HTML (professional look) with a plain-text fallback part.
     msg.set_content(text)
+    msg.add_alternative(format_email_body_html(subject, text), subtype="html")
 
     with smtplib.SMTP(host, port, timeout=30) as smtp:
         smtp.starttls()

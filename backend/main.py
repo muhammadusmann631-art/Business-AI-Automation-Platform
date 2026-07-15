@@ -14,7 +14,7 @@ except Exception:
 
 from agents import Agent, Runner, function_tool
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +27,7 @@ import database as db
 import dead_letter
 import exporting
 import feedback
+import importer
 import qa
 import resilience
 import router
@@ -205,6 +206,26 @@ def _maybe_inject_fault(tool_name: str) -> None:
     # recover mode with no remaining failures -> fall through and succeed.
 
 
+# Output-producing tools are gated on the plan: they only run if the plan
+# actually called for them. Data/compare/preference tools are always allowed.
+RESTRICTED_TOOLS = {"make_chart", "generate_report", "export_excel", "draft_email"}
+
+
+def _allowed_tools_from_plan(steps: list[str]) -> set[str]:
+    """Which restricted tools the plan explicitly asks for (Precise Fix 4)."""
+    text = " ".join(steps).lower()
+    allowed: set[str] = set()
+    if re.search(r"chart|graph|plot|visuali", text):
+        allowed.add("make_chart")
+    if re.search(r"\bpdf\b|report", text):
+        allowed.add("generate_report")
+    if re.search(r"excel|xlsx|spreadsheet|\bexport\b", text):
+        allowed.add("export_excel")
+    if re.search(r"e-?mail|\bmail\b|bhej|send", text):
+        allowed.add("draft_email")
+    return allowed
+
+
 def guarded(tool_name: str, fn, dedup_key: str | None = None):
     """Run a tool's real work with retry + backoff, dead-lettering on exhaustion.
 
@@ -217,6 +238,12 @@ def guarded(tool_name: str, fn, dedup_key: str | None = None):
     double-calling LLM never produces duplicate charts/PDFs/Excels/emails.
     """
     tid = _REQUEST_CTX.get("trace_id")
+
+    # Precise Fix 4: block output tools the plan never asked for.
+    allowed = _REQUEST_CTX.get("allowed_tools")
+    if allowed is not None and tool_name in RESTRICTED_TOOLS and tool_name not in allowed:
+        print(f"[GUARD] blocked unplanned tool call: {tool_name}")
+        return False, f"(skipped: '{tool_name}' was not requested by the user)"
 
     calls: dict = _REQUEST_CTX.setdefault("tool_calls", {})
     if dedup_key is not None and dedup_key in calls:
@@ -300,8 +327,9 @@ def generate_report(title: str, body: str) -> str:
         title: Report title, e.g. "June Sales Report".
         body: The full report text/summary to place in the PDF.
     """
+    # One PDF per request (skill rule) -> dedup by tool name regardless of args.
     ok, out = guarded("generate_report", lambda: generate_report_impl(title, body),
-                      dedup_key=f"generate_report:{title}:{body[:120]}")
+                      dedup_key="generate_report")
     if not ok:
         return out
     result = out
@@ -478,7 +506,7 @@ def export_excel(query: str, title: str) -> str:
         rows = db.run_select(query)
         return exporting.export_rows(title, rows)
 
-    ok, out = guarded("export_excel", _do, dedup_key=f"export_excel:{title}:{query}")
+    ok, out = guarded("export_excel", _do, dedup_key="export_excel")  # one Excel per request
     if not ok:
         return out
     _REQUEST_CTX.setdefault("files", []).append(
@@ -517,7 +545,7 @@ def make_chart(query: str, title: str, chart_type: str = "bar") -> str:
         values = [r[value_col] for r in rows]
         return charting.make_chart(title, labels, values, chart_type, _chart_color())
 
-    ok, out = guarded("make_chart", _do, dedup_key=f"make_chart:{title}:{query}:{chart_type}")
+    ok, out = guarded("make_chart", _do, dedup_key="make_chart")  # one chart per request
     if not ok:
         return out
     _REQUEST_CTX.setdefault("files", []).append(
@@ -593,10 +621,14 @@ sales_agent = Agent(
         "- Lasting user preference (e.g. 'graphs blue'): use save_preference "
         "with a clear key like graph_color.\n"
         + _SCHEMA_HINT + "\n"
-        "IMPORTANT: Call each tool ONLY ONCE per step. Never call the same "
-        "tool twice with the same or similar parameters. Once you have a "
-        "tool's result, USE it — do not call the tool again. One chart, one "
-        "PDF, one Excel, one email draft per request.\n"
+        "RESPONSE RULES — do EXACTLY the step, nothing extra:\n"
+        "- Do ONLY what THIS step says. If the step is to report a number, "
+        "give the NUMBER — do NOT make a chart, PDF, or Excel.\n"
+        "- If the step is 'make a graph', make ONE graph and nothing else.\n"
+        "- If the step is 'make a PDF', make ONE PDF and nothing else.\n"
+        "- Call each tool ONLY ONCE. Never call the same tool twice.\n"
+        "- Example — User: 'June ki sales kitni thi?' -> Good: 'June ki sales "
+        "$45,000 thi.'  Bad: also making a PDF/graph the user never asked for.\n"
         "Format numbers with commas/currency where sensible. Reply with only "
         "the result of this step, briefly."
     ),
@@ -615,8 +647,25 @@ class Plan(BaseModel):
 planner_agent = Agent(
     name="Planner",
     instructions=(
-        "You break a user request into a short ordered list of steps for other "
-        "agents to execute. Rules:\n"
+        "You break a user request into a short ordered list of steps.\n\n"
+        "CRITICAL RULE — MATCH THE REQUEST EXACTLY. Plan ONLY what the user "
+        "asked, nothing more:\n"
+        "- Asking for DATA ('sales btao', 'amount', 'kitni thi', 'list do', "
+        "'dikhao') -> Plan: 1. Query the data  2. Tell the user the answer. "
+        "Do NOT add chart/PDF/Excel/email steps.\n"
+        "- Asking for a GRAPH ('graph banao', 'chart') -> 1. Query data  2. "
+        "Make ONE chart. NO PDF/Excel/email.\n"
+        "- Asking for a REPORT/PDF ('PDF report banao') -> 1. Query data  2. "
+        "Generate ONE PDF. NO chart/Excel/email.\n"
+        "- Asking for EXCEL ('Excel mein do', 'export') -> 1. Query data  2. "
+        "Export ONE Excel. NO chart/PDF/email.\n"
+        "- Asking to EMAIL ('email bhejo/karo') -> 1. Query data  2. Draft ONE "
+        "email. NO chart/PDF/Excel unless they explicitly said to attach it.\n"
+        "- COMBINED ('sales nikal, graph bana, PDF bana, email karo') -> cover "
+        "EACH mentioned item ONCE, and only the mentioned ones.\n"
+        "- NEVER assume the user wants a PDF/graph/Excel/email unless they "
+        "EXPLICITLY say so. When in doubt, do LESS — they can ask for more.\n\n"
+        "Other rules:\n"
         "- Use as few steps as possible: 1 step for a simple message or "
         "greeting, 2-4 steps only when the request genuinely has parts.\n"
         "- Each step is one short imperative sentence.\n"
@@ -652,7 +701,9 @@ supervisor_agent = Agent(
         "- Be professional but friendly; concise and actionable.\n"
         "- Format numbers properly (commas, currency symbols where sensible).\n"
         "- Use ONLY the data from the step results — never invent numbers.\n"
-        "- If a download link or chart was produced, mention it naturally.\n"
+        "- Answer ONLY what the user asked. If they asked for a number, give "
+        "the number — do NOT offer or mention PDFs/graphs/Excel they did not "
+        "request. Only mention a file/chart if one was actually produced.\n"
         "- Respect known user preferences. Do not mention the plan, the steps, "
         "or other agents."
     ),
@@ -788,6 +839,8 @@ async def run_supervised(raw_message: str, session_id: str) -> tuple[str, dict |
             sp["output"] = steps
             sp["tokens"] = tracer.est_tokens(memory_context, message, *steps)
             _acct(sp["tokens"])
+        # Precise Fix 4: only the output tools the plan asked for may run.
+        _REQUEST_CTX["allowed_tools"] = _allowed_tools_from_plan(steps)
         print("[PLAN] " + "  ".join(f"{i}. {s}" for i, s in enumerate(steps, 1)))
 
         step_results: list[str] = []
@@ -903,6 +956,7 @@ async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, s
     _REQUEST_CTX["files"] = []                                   # Polish Fix 1
     _REQUEST_CTX["send_intent"] = _detect_send_intent(message)   # Polish Fix 2
     _REQUEST_CTX["tool_calls"] = {}                              # Part 1: dedup cache
+    _REQUEST_CTX["allowed_tools"] = None                         # Precise Fix 4: plan gate
     route, status, reply, pending = "complex", "success", "", None
     try:
         history = short_term.history(session_id)
@@ -1175,6 +1229,90 @@ def admin_delete_row(table: str, row_id: str):
         raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
 
 
+# ------------------------------ CSV/Excel import --------------------------- #
+async def _read_upload(table: str, file: UploadFile) -> bytes:
+    if table not in db.ADMIN_TABLES:
+        raise HTTPException(status_code=404, detail=f"Unknown table: {table}")
+    content = await file.read()
+    if len(content) > importer.MAX_BYTES:
+        raise HTTPException(status_code=400, detail="File too large (max 5 MB).")
+    return content
+
+
+@app.post("/api/admin/preview-import/{table}")
+async def admin_preview_import(table: str, file: UploadFile = File(...)):
+    """Parse + map an uploaded file WITHOUT importing (preview first 5 rows)."""
+    content = await _read_upload(table, file)
+    try:
+        return importer.preview(table, file.filename, content)
+    except importer.ImportError_ as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/admin/import/{table}")
+async def admin_import(table: str, file: UploadFile = File(...)):
+    """Import a CSV/Excel file into a table (dedup-aware, never overwrites)."""
+    content = await _read_upload(table, file)
+    try:
+        result = importer.do_import(table, file.filename, content)
+    except importer.ImportError_ as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    print(f"[IMPORT] {table}: {result['imported']} rows imported from "
+          f"{file.filename}, {result['skipped']} skipped")
+    return result
+
+
+# ----------------------- Dashboard business charts ------------------------- #
+@app.get("/api/dashboard/business-stats")
+def business_stats():
+    """All data for the dashboard's 4 business charts + summary, in one call."""
+    def q(sql: str) -> list[dict]:
+        try:
+            return db.run_select(sql)
+        except Exception as e:
+            print(f"[STATS] query failed: {e}")
+            return []
+
+    _MONTH_ORDER = (
+        "January February March April May June July August September October "
+        "November December"
+    ).split()
+    revenue = q("SELECT month, SUM(amount) AS amount FROM sales GROUP BY month")
+    revenue.sort(key=lambda r: _MONTH_ORDER.index(r["month"]) if r["month"] in _MONTH_ORDER else 99)
+
+    expenses = q("SELECT category, SUM(amount) AS amount FROM expenses GROUP BY category ORDER BY amount DESC")
+    top_customers = q(
+        "SELECT c.name AS name, SUM(s.amount) AS revenue FROM sales s "
+        "JOIN customers c ON s.customer_id = c.id GROUP BY c.id "
+        "ORDER BY revenue DESC LIMIT 5"
+    )
+    invoice_status = q("SELECT status, COUNT(*) AS count FROM invoices GROUP BY status")
+
+    def scalar(sql: str, default=0):
+        rows = q(sql)
+        if rows:
+            v = list(rows[0].values())[0]
+            return v if v is not None else default
+        return default
+
+    summary = {
+        "total_revenue": scalar("SELECT SUM(amount) FROM sales"),
+        "total_expenses": scalar("SELECT SUM(amount) FROM expenses"),
+        "active_customers": scalar("SELECT COUNT(*) FROM customers WHERE status='active'"),
+        "pending_invoices": scalar("SELECT COUNT(*) FROM invoices WHERE status='pending'"),
+        "overdue_invoices": scalar("SELECT COUNT(*) FROM invoices WHERE status='overdue'"),
+    }
+    summary["net_profit"] = (summary["total_revenue"] or 0) - (summary["total_expenses"] or 0)
+
+    return {
+        "revenue_trend": revenue,
+        "expense_breakdown": expenses,
+        "top_customers": top_customers,
+        "invoice_status": invoice_status,
+        "summary": summary,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # WhatsApp channel (Twilio). Public endpoint — validated by Twilio signature,
 # not JWT. Runs incoming messages through the SAME pipeline as web chat.
@@ -1190,9 +1328,18 @@ async def whatsapp_webhook(request: Request):
     raw = (await request.body()).decode("utf-8", "replace")
     params = {k: v[0] for k, v in parse_qs(raw).items()}
 
-    # Security: verify the request genuinely came from Twilio.
-    if not whatsapp.validate_signature(
-        str(request.url), params, request.headers.get("X-Twilio-Signature")
+    # Security: verify the request genuinely came from Twilio. Behind a proxy
+    # (Render), rebuild the ORIGINAL public https URL from forwarded headers —
+    # Twilio signs that exact URL, not the internal http one FastAPI sees.
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    public_url = f"{proto}://{host}{request.url.path}"
+    if request.url.query:
+        public_url += f"?{request.url.query}"
+    sig = request.headers.get("X-Twilio-Signature")
+    if not (
+        whatsapp.validate_signature(public_url, params, sig)
+        or whatsapp.validate_signature(str(request.url), params, sig)
     ):
         raise HTTPException(status_code=403, detail="Invalid Twilio signature.")
 

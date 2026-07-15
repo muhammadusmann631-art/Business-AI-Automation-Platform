@@ -9,3 +9,4 @@ matplotlib
 bcrypt
 PyJWT
 twilio
+python-multipart

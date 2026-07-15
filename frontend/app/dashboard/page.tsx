@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { authFetch, getToken } from "../lib/api";
+import BusinessOverview, { type BusinessStats } from "../components/BusinessOverview";
 
 // Relative — Next.js rewrites proxy these to the backend (see next.config.ts).
 const API_URL = "";
@@ -83,6 +84,7 @@ export default function Dashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [fbStats, setFbStats] = useState<FeedbackStats | null>(null);
   const [fbRecent, setFbRecent] = useState<FeedbackEntry[]>([]);
+  const [biz, setBiz] = useState<BusinessStats | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -91,16 +93,18 @@ export default function Dashboard() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, t, fs, fr] = await Promise.all([
+      const [s, t, fs, fr, bz] = await Promise.all([
         authFetch(`${API_URL}/api/stats`).then((r) => r.json()),
         authFetch(`${API_URL}/api/traces?limit=50`).then((r) => r.json()),
         authFetch(`${API_URL}/api/feedback/stats`).then((r) => r.json()),
         authFetch(`${API_URL}/api/feedback/recent?limit=20`).then((r) => r.json()),
+        authFetch(`${API_URL}/api/dashboard/business-stats`).then((r) => r.json()),
       ]);
       setStats(s);
       setTraces(t.traces ?? []);
       setFbStats(fs);
       setFbRecent(fr.feedback ?? []);
+      setBiz(bz);
       setLastRefresh(new Date());
     } catch {
       /* keep old data on transient failures */
@@ -171,7 +175,10 @@ export default function Dashboard() {
       </header>
 
       <div className="mx-auto max-w-5xl px-4 py-6">
-        {/* Stats */}
+        {/* Business Overview (live charts) */}
+        <BusinessOverview stats={biz} />
+
+        {/* Observability stats */}
         <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
             { label: "Requests", value: stats?.total_requests ?? "—" },
