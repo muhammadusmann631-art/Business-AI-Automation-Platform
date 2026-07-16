@@ -65,10 +65,20 @@ type PendingApproval = {
 
 type FileOut = { name: string; url: string; type: string };
 
+type BulkApproval = {
+  bulk_id: string;
+  action: string;
+  total_count: number;
+  preview: Record<string, string | number>[];
+  remaining: number;
+  risk_reason: string;
+};
+
 type Message = {
-  role: "user" | "assistant" | "error" | "approval";
+  role: "user" | "assistant" | "error" | "approval" | "bulk";
   content: string;
   pending?: PendingApproval;
+  bulk?: BulkApproval;
   decided?: "approved" | "rejected";
   traceId?: string;
   feedback?: "sent";
@@ -91,6 +101,10 @@ export default function Home() {
   const pulseId = useRef(0);
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
+  const [listening, setListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
 
   // Auth guard: no token -> go to login.
   useEffect(() => {
@@ -99,6 +113,9 @@ export default function Home() {
       return;
     }
     setUser(getUser());
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    if (w.SpeechRecognition || w.webkitSpeechRecognition) setVoiceSupported(true);
   }, [router]);
 
   useEffect(() => {
@@ -188,6 +205,16 @@ export default function Home() {
           },
         ]);
       }
+      if (data.pending_bulk_approval) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "bulk",
+            content: "This bulk action needs your approval.",
+            bulk: data.pending_bulk_approval,
+          },
+        ]);
+      }
       if (data.trace_id) animateTrace(data.trace_id, null);
       else setActiveNode(null);
     } catch (err) {
@@ -242,6 +269,79 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function decideBulk(index: number, decision: "approve" | "reject") {
+    const msg = messages[index];
+    if (!msg?.bulk || msg.decided || loading) return;
+    setLoading(true);
+    setMessages((prev) =>
+      prev.map((m, i) =>
+        i === index ? { ...m, decided: decision === "approve" ? "approved" : "rejected" } : m
+      )
+    );
+    try {
+      const res = await authFetch(`${API_URL}/api/bulk/${decision}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bulk_id: msg.bulk.bulk_id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Request failed");
+      setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
+    } catch (err) {
+      setMessages((prev) => prev.map((m, i) => (i === index ? { ...m, decided: undefined } : m)));
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "error",
+          content:
+            err instanceof Error && err.message !== "Failed to fetch"
+              ? err.message
+              : "Couldn't reach the server. Is the backend running on port 8000?",
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /* --------------------------------- voice ---------------------------------- */
+  function toggleMic() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+    if (listening) {
+      recognitionRef.current?.stop();
+      return;
+    }
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.continuous = false;
+    rec.interimResults = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rec.onresult = (e: any) => {
+      let t = "";
+      for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
+      setInput(t);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rec.onerror = (e: any) => {
+      setListening(false);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "error",
+            content: "Microphone access denied. Please allow microphone in your browser settings.",
+          },
+        ]);
+      }
+    };
+    rec.onend = () => setListening(false);
+    recognitionRef.current = rec;
+    setListening(true);
+    rec.start();
   }
 
   /* ------------------------------- feedback --------------------------------- */
@@ -409,7 +509,63 @@ export default function Home() {
         )}
 
         {messages.map((m, i) =>
-          m.role === "approval" && m.pending ? (
+          m.role === "bulk" && m.bulk ? (
+            <div key={i} className="message-in flex justify-start">
+              <div className="max-w-[90%] rounded-2xl rounded-bl-md border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm shadow-lg shadow-amber-500/5">
+                <div className="mb-1 flex items-center gap-2 font-semibold text-amber-300">
+                  <span>📦</span>
+                  <span>
+                    Bulk action — {m.bulk.total_count}{" "}
+                    {m.bulk.action.replace(/_/g, " ")}
+                  </span>
+                </div>
+                <p className="mb-2 text-xs text-amber-200/70">{m.bulk.risk_reason}</p>
+                <div className="mb-2 space-y-2">
+                  {m.bulk.preview.map((item, k) => (
+                    <div key={k} className="rounded-xl bg-black/30 p-2.5 text-xs text-emerald-50/80">
+                      {Object.entries(item).map(([key, val]) => (
+                        <p key={key}>
+                          <span className="font-semibold capitalize text-emerald-300/70">
+                            {key.replace(/_/g, " ")}:
+                          </span>{" "}
+                          {String(val)}
+                        </p>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+                {m.bulk.remaining > 0 && (
+                  <p className="mb-2 text-xs text-amber-200/50">+ {m.bulk.remaining} more</p>
+                )}
+                {m.decided ? (
+                  <p
+                    className={`text-xs font-semibold ${
+                      m.decided === "approved" ? "text-emerald-400" : "text-rose-400"
+                    }`}
+                  >
+                    {m.decided === "approved" ? "✓ Approved — running all" : "✕ Rejected — nothing sent"}
+                  </p>
+                ) : (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => decideBulk(i, "approve")}
+                      disabled={loading}
+                      className="rounded-lg bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition hover:bg-emerald-400 active:scale-95 disabled:opacity-40"
+                    >
+                      ✓ Approve All ({m.bulk.total_count})
+                    </button>
+                    <button
+                      onClick={() => decideBulk(i, "reject")}
+                      disabled={loading}
+                      className="rounded-lg bg-rose-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-rose-400 active:scale-95 disabled:opacity-40"
+                    >
+                      ✕ Reject All
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : m.role === "approval" && m.pending ? (
             <div key={i} className="message-in flex justify-start">
               <div className="max-w-[85%] rounded-2xl rounded-bl-md border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm shadow-lg shadow-amber-500/5">
                 <div className="mb-2 flex items-center gap-2 font-semibold text-amber-300">
@@ -612,10 +768,24 @@ export default function Home() {
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Message the core…"
+            placeholder={listening ? "Listening…" : "Message the core…"}
             autoFocus
             className="flex-1 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] px-4 py-3 text-sm text-emerald-50 outline-none transition placeholder:text-emerald-200/30 focus:border-emerald-400/50 focus:ring-2 focus:ring-emerald-500/20"
           />
+          {voiceSupported && (
+            <button
+              type="button"
+              onClick={toggleMic}
+              title={listening ? "Stop listening" : "Speak"}
+              className={`rounded-xl border px-3.5 py-3 text-lg transition active:scale-95 ${
+                listening
+                  ? "animate-pulse border-rose-400/50 bg-rose-500/20 text-rose-300"
+                  : "border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-300 hover:bg-emerald-500/10"
+              }`}
+            >
+              🎙️
+            </button>
+          )}
           <button
             type="submit"
             disabled={loading || !input.trim()}

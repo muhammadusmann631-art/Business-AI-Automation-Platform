@@ -428,6 +428,41 @@ _IMPORT_DEDUP_KEY = {
 }
 
 
+def bulk_set(table: str, ids: list, column: str, value) -> int:
+    """Set one column to one value for many rows by id. Returns rows changed."""
+    _check_table(table)
+    if column not in ADMIN_TABLES[table] or not ids:
+        raise UnsafeQueryError("Invalid column or empty id list.")
+    placeholders = ", ".join("?" for _ in ids)
+    conn = sqlite3.connect(_db_path())
+    try:
+        cur = conn.execute(
+            f"UPDATE {table} SET {column}=? WHERE id IN ({placeholders})",
+            (value, *ids),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def bulk_set_values(table: str, column: str, pairs: list[tuple]) -> int:
+    """Set a column to a per-row value: pairs = [(id, value), ...]. Returns changed."""
+    _check_table(table)
+    if column not in ADMIN_TABLES[table] or not pairs:
+        raise UnsafeQueryError("Invalid column or empty pairs.")
+    conn = sqlite3.connect(_db_path())
+    try:
+        changed = 0
+        for row_id, val in pairs:
+            cur = conn.execute(f"UPDATE {table} SET {column}=? WHERE id=?", (val, row_id))
+            changed += cur.rowcount
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+
 def import_rows(table: str, rows: list[dict]) -> dict:
     """Bulk-insert mapped rows, skipping duplicates. Returns import counts.
 

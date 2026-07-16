@@ -23,6 +23,7 @@ from pydantic import BaseModel
 import alerts as alerts_engine
 import approval
 import auth
+import bulk
 import charting
 import database as db
 import dead_letter
@@ -135,6 +136,7 @@ _REQUEST_CTX: dict = {
     "files": [],         # Polish: downloadable files (PDFs) produced this request
     "send_intent": False, # Polish: user explicitly asked to SEND an email
     "alert_note": "",    # Batch 2: active-alert note injected on first message
+    "pending_bulk": None, # Batch 3: a bulk operation awaiting approval
 }
 
 
@@ -621,6 +623,148 @@ def calculate_pnl(period: str = "current_month") -> str:
     return pnl_mod.format_pnl(out)
 
 
+@function_tool
+def bulk_email_reminders() -> str:
+    """Prepare personalized payment-reminder emails for ALL overdue clients, as
+    ONE bulk action for human approval. Finds every overdue/past-due invoice,
+    drafts a personalized email per client, and parks them for Approve All /
+    Reject All. Sends NOTHING until approved. Use for "saare overdue clients ko
+    reminder bhejo" and similar bulk-reminder requests.
+    """
+    print("[TOOL CALLED] bulk_email_reminders")
+    tid = _REQUEST_CTX.get("trace_id")
+    with tracer.span(tid, "tool:bulk_email_reminders") as sp:
+        rows = db.run_select(
+            "SELECT i.invoice_number AS inv, i.amount AS amount, i.due_date AS due, "
+            "c.name AS name, c.email AS email FROM invoices i "
+            "LEFT JOIN customers c ON i.customer_id=c.id "
+            "WHERE i.status='overdue' OR (i.status='pending' AND i.due_date < date('now'))"
+        )
+        items, no_email = [], 0
+        for r in rows:
+            if not r["email"] or "@" not in str(r["email"]):
+                no_email += 1
+                continue
+            body = (
+                f"Dear {r['name']},\n\n"
+                f"This is a friendly reminder that Invoice {r['inv']} for "
+                f"${float(r['amount']):,.0f} was due on {r['due']} and is currently "
+                f"outstanding.\n\nWe would appreciate payment at your earliest "
+                f"convenience.\n\nBest regards,\nAGI-CORE Business Team"
+            )
+            items.append({
+                "to": r["email"], "subject": f"Payment Reminder — Invoice {r['inv']}",
+                "body": body, "name": r["name"], "amount": float(r["amount"]),
+                "invoice_number": r["inv"], "due_date": r["due"],
+            })
+        sp["output"] = f"{len(items)} reminder emails prepared"
+
+    if not items:
+        return "No overdue invoices with a valid email address were found."
+
+    def _execute() -> dict:
+        success = failed = 0
+        for it in items:
+            try:
+                send_email_impl(it["to"], it["subject"], it["body"])
+                success += 1
+            except Exception as e:
+                print(f"[BULK] email failed for {it['to']}: {e}")
+                failed += 1
+        return {"success": success, "failed": failed, "total": len(items)}
+
+    preview = [
+        {"to": it["to"], "subject": it["subject"], "amount": it["amount"],
+         "invoice_number": it["invoice_number"], "due_date": it["due_date"]}
+        for it in items[:3]
+    ]
+    op = bulk.create("send_email", len(items), preview,
+                     f"Sending {len(items)} emails to external recipients",
+                     _REQUEST_CTX["session_id"], _execute)
+    _REQUEST_CTX["pending_bulk"] = bulk.payload(op)
+    note = f" ({no_email} skipped — no email on file)" if no_email else ""
+    return f"{len(items)} personalized reminder emails are ready for your approval.{note}"
+
+
+@function_tool
+def bulk_update_invoice_status(due_before: str = "", from_status: str = "pending",
+                               to_status: str = "overdue") -> str:
+    """Prepare a BULK invoice status update for human approval. E.g. mark all
+    pending invoices due before a date as overdue. Updates NOTHING until
+    approved.
+
+    Args:
+        due_before: Optional ISO date (YYYY-MM-DD); only invoices due before it.
+        from_status: Status to match (default 'pending').
+        to_status: New status (default 'overdue').
+    """
+    print(f"[TOOL CALLED] bulk_update_invoice_status({from_status}->{to_status})")
+    where, params = "status=?", [from_status]
+    if due_before:
+        where += " AND due_date < ?"
+        params.append(due_before)
+    rows = db.run_select(
+        f"SELECT id, invoice_number AS inv, amount, due_date AS due FROM invoices WHERE {where}",
+        tuple(params),
+    )
+    if not rows:
+        return f"No {from_status} invoices matched."
+    ids = [r["id"] for r in rows]
+
+    def _execute() -> dict:
+        try:
+            n = db.bulk_set("invoices", ids, "status", to_status)
+            return {"success": n, "failed": len(ids) - n, "total": len(ids)}
+        except Exception as e:
+            print(f"[BULK] status update failed: {e}")
+            return {"success": 0, "failed": len(ids), "total": len(ids)}
+
+    preview = [{"invoice_number": r["inv"], "amount": float(r["amount"]), "due_date": r["due"]}
+               for r in rows[:3]]
+    op = bulk.create("update_status", len(ids), preview,
+                     f"Marking {len(ids)} invoices as {to_status}",
+                     _REQUEST_CTX["session_id"], _execute)
+    _REQUEST_CTX["pending_bulk"] = bulk.payload(op)
+    return f"{len(ids)} invoices will be marked as {to_status}. Approve?"
+
+
+@function_tool
+def bulk_update_price(percent: float, category: str = "") -> str:
+    """Prepare a BULK product price change (by percent) for human approval.
+    Updates NOTHING until approved.
+
+    Args:
+        percent: Percentage change, e.g. 10 for +10%, -5 for -5%.
+        category: Optional product category to limit the change to.
+    """
+    print(f"[TOOL CALLED] bulk_update_price({percent}%, {category or 'all'})")
+    where, params = "status='active'", []
+    if category:
+        where += " AND category=? COLLATE NOCASE"
+        params.append(category)
+    rows = db.run_select(f"SELECT id, name, price FROM products WHERE {where}", tuple(params))
+    if not rows:
+        return "No matching active products found."
+    factor = 1 + percent / 100
+    pairs = [(r["id"], round(float(r["price"]) * factor, 2)) for r in rows]
+
+    def _execute() -> dict:
+        try:
+            n = db.bulk_set_values("products", "price", pairs)
+            return {"success": n, "failed": len(pairs) - n, "total": len(pairs)}
+        except Exception as e:
+            print(f"[BULK] price update failed: {e}")
+            return {"success": 0, "failed": len(pairs), "total": len(pairs)}
+
+    preview = [{"name": r["name"], "old_price": float(r["price"]),
+                "new_price": round(float(r["price"]) * factor, 2)} for r in rows[:3]]
+    op = bulk.create("update_price", len(rows), preview,
+                     f"Changing price of {len(rows)} products by {percent:+g}%",
+                     _REQUEST_CTX["session_id"], _execute)
+    _REQUEST_CTX["pending_bulk"] = bulk.payload(op)
+    return f"{len(rows)} products will change price by {percent:+g}%. Approve?"
+
+
 sales_agent = Agent(
     name="Worker",
     instructions=(
@@ -638,6 +782,11 @@ sales_agent = Agent(
         "- Profit/Loss/P&L/financial summary/'kitna kamaya': use calculate_pnl "
         "with the period. Present revenue, expense breakdown, net profit/loss, "
         "and the comparison clearly. Do NOT make a PDF/chart unless asked.\n"
+        "- BULK actions on MANY items ('saare/all/sab'): use bulk_email_reminders "
+        "(remind all overdue clients), bulk_update_invoice_status (mark many "
+        "invoices), or bulk_update_price (change many product prices). Each "
+        "prepares a preview + total count for ONE approval — it does not "
+        "execute until the human approves. State the total count.\n"
         "- Report/PDF: use generate_report, putting REAL figures from earlier "
         "steps into the body. Return the link it gives you.\n"
         "- Email: use draft_email. If the user asked to SEND, set send=true — "
@@ -660,6 +809,7 @@ sales_agent = Agent(
     tools=[
         query_database, query_sales, export_excel, make_chart, compare_data,
         calculate_pnl, generate_report, draft_email, save_preference,
+        bulk_email_reminders, bulk_update_invoice_status, bulk_update_price,
     ],
 )
 
@@ -708,7 +858,11 @@ planner_agent = Agent(
         "email) that needs that data. Do not plan steps needing any other "
         "capability (no web search).\n"
         "- NEVER create duplicate steps. Each tool/action appears AT MOST "
-        "ONCE (never two chart steps or two PDF steps). Max 2-4 steps."
+        "ONCE (never two chart steps or two PDF steps). Max 2-4 steps.\n"
+        "- BULK: if the user says 'saare'/'all'/'sab'/'bulk' or refers to many "
+        "items (e.g. 'all overdue clients ko reminder bhejo', 'saare pending "
+        "invoices overdue mark karo'), plan a single bulk step (prepare the "
+        "bulk action for approval). Bulk actions always go through approval."
     ),
     model="gpt-4o-mini",
     output_type=Plan,
@@ -965,7 +1119,9 @@ async def run_fast_track(message: str, session_id: str) -> str:
     return reply
 
 
-async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, str | None, list]:
+async def run_routed(
+    message: str, session_id: str
+) -> tuple[str, dict | None, str | None, list, dict | None]:
     """Phase 8 entry + Phase 9 trace: classify, then fast-track or full pipeline.
 
     Owns the trace lifecycle — opens the trace, records router + response
@@ -987,6 +1143,7 @@ async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, s
     _REQUEST_CTX["send_intent"] = _detect_send_intent(message)   # Polish Fix 2
     _REQUEST_CTX["tool_calls"] = {}                              # Part 1: dedup cache
     _REQUEST_CTX["allowed_tools"] = None                         # Precise Fix 4: plan gate
+    _REQUEST_CTX["pending_bulk"] = None                          # Batch 3: bulk op
 
     # Batch 2: on the FIRST message of a session, surface active alerts to the
     # agent so it can proactively mention them.
@@ -1033,7 +1190,7 @@ async def run_routed(message: str, session_id: str) -> tuple[str, dict | None, s
             if f["url"] not in seen_urls:
                 seen_urls.add(f["url"])
                 unique_files.append(f)
-        return reply, pending, tid, unique_files
+        return reply, pending, tid, unique_files, _REQUEST_CTX.get("pending_bulk")
     except Exception:
         status = "error"
         raise
@@ -1051,6 +1208,7 @@ class ChatResponse(BaseModel):
     pending_approval: dict | None = None  # Phase 7: set when a decision is needed
     trace_id: str | None = None           # Phase 9: correlate with the dashboard
     files: list[dict] = []                 # Polish Fix 1: downloadable outputs
+    pending_bulk_approval: dict | None = None  # Batch 3: bulk action awaiting approval
 
 
 class ApprovalRequest(BaseModel):
@@ -1119,8 +1277,9 @@ async def chat(req: ChatRequest, request: Request):
         )
     try:
         sid = _user_session(request, req.session_id)
-        reply, pending, trace_id, files = await run_routed(req.message, sid)
-        return ChatResponse(reply=reply, pending_approval=pending, trace_id=trace_id, files=files)
+        reply, pending, trace_id, files, pending_bulk = await run_routed(req.message, sid)
+        return ChatResponse(reply=reply, pending_approval=pending, trace_id=trace_id,
+                            files=files, pending_bulk_approval=pending_bulk)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent run failed: {e}")
 
@@ -1429,18 +1588,26 @@ async def whatsapp_webhook(request: Request):
         if decision in ("APPROVE", "REJECT") and _WA_PENDING.get(from_number):
             aid = _WA_PENDING.pop(from_number)
             try:
-                if decision == "APPROVE":
+                if aid.startswith("bulk:"):
+                    bid = aid.split(":", 1)[1]
+                    if decision == "APPROVE":
+                        r = bulk.approve(bid)
+                        result = f"Done — {r['success']}/{r['total']} succeeded, {r['failed']} failed."
+                    else:
+                        bulk.reject(bid)
+                        result = "Cancelled — the bulk action was not executed."
+                elif decision == "APPROVE":
                     result = approval.approve(aid)
                 else:
                     entry = approval.reject(aid)
                     result = f"Cancelled — the {entry.action.replace('_', ' ')} was not executed."
-            except approval.ApprovalNotFound:
+            except (approval.ApprovalNotFound, bulk.BulkNotFound):
                 result = "That request has expired or was already handled."
             whatsapp.send_reply(from_number, whatsapp.to_plain(result))
             return JSONResponse({"ok": True})
 
         # Normal message -> same pipeline as web chat.
-        reply, pending, _trace_id, files = await run_routed(body, session)
+        reply, pending, _trace_id, files, pending_bulk = await run_routed(body, session)
         text = whatsapp.to_plain(reply)
         for f in files:  # WhatsApp: send file links (public URL)
             text += f"\n\n{f['type'].upper()}: {PUBLIC_BASE_URL}{f['url']}"
@@ -1450,6 +1617,13 @@ async def whatsapp_webhook(request: Request):
             text += (
                 f"\n\n[APPROVAL NEEDED] Send email to {d.get('to', '')}?\n"
                 "Reply APPROVE to send, or REJECT to cancel."
+            )
+        elif pending_bulk:
+            _WA_PENDING[from_number] = "bulk:" + pending_bulk["bulk_id"]
+            text += (
+                f"\n\n[BULK APPROVAL] {pending_bulk['total_count']} "
+                f"{pending_bulk['action'].replace('_', ' ')} actions ready.\n"
+                "Reply APPROVE to run all, or REJECT to cancel."
             )
         whatsapp.send_reply(from_number, text)
     except Exception as e:
@@ -1488,6 +1662,41 @@ async def reject_action(req: ApprovalRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Rejection failed: {e}")
+
+
+# ---------------------------- Bulk approval -------------------------------- #
+class BulkRequest(BaseModel):
+    bulk_id: str
+
+
+@app.post("/api/bulk/approve")
+def bulk_approve(req: BulkRequest):
+    """Execute ALL items in a prepared bulk operation."""
+    try:
+        result = bulk.approve(req.bulk_id)
+        action = result.get("action", "action").replace("_", " ")
+        return {
+            "reply": f"✅ {result['success']}/{result['total']} {action} succeeded"
+                     + (f", {result['failed']} failed" if result["failed"] else "") + ".",
+            **result,
+        }
+    except bulk.BulkNotFound:
+        raise HTTPException(status_code=404, detail="This bulk action has expired or was already decided.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bulk execution failed: {e}")
+
+
+@app.post("/api/bulk/reject")
+def bulk_reject(req: BulkRequest):
+    """Cancel a bulk operation. Nothing executes."""
+    try:
+        op = bulk.reject(req.bulk_id)
+        return {"reply": f"Bulk action cancelled — {op.total_count} "
+                         f"{op.action.replace('_', ' ')} actions were not executed."}
+    except bulk.BulkNotFound:
+        raise HTTPException(status_code=404, detail="This bulk action has expired or was already decided.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Bulk rejection failed: {e}")
 
 
 if __name__ == "__main__":

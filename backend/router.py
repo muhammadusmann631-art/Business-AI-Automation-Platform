@@ -32,7 +32,7 @@ _COMPLEX_SIGNALS = re.compile(
     # business tables / entities (Level 1)
     r"customer|client|invoice|bill|product|stock|inventory|expense|kharch|"
     r"overdue|pending|paid|revenue|p&l|pnl|profit|loss|financial|kamaya|kamai|"
-    r"alert|import|"
+    r"alert|import|reminder|bulk|saare|saari|\ball\b|price|badhao|"
     r"january|february|march|april|may|june|july|august|september|october|"
     r"november|december|force_fail)\b"
 )
