@@ -25,7 +25,7 @@ export default function Signup() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, email, password }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Signup failed");
       router.replace("/login?created=1");
     } catch (err) {

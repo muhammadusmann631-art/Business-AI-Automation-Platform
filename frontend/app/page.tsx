@@ -2,7 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { authFetch, getToken, getUser, logout, type User } from "./lib/api";
+import { apiJson, getToken, getUser, logout, type User } from "./lib/api";
+
+// Any thrown ApiError already carries a clean, user-safe message.
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : "Something went wrong, please try again.";
+}
 
 // Relative — Next.js rewrites (next.config.ts) proxy these to the backend, so
 // the app works from a single URL both locally and on Render.
@@ -163,8 +168,10 @@ export default function Home() {
 
   async function animateTrace(traceId: string, route: string | null) {
     try {
-      const full = await fetch(`${API_URL}/api/traces/${traceId}`).then((r) => r.json());
-      await playPath(nodesFromTrace(full.spans ?? [], route ?? full.route ?? null));
+      const full = await apiJson<{ spans?: { name: string }[]; route?: string | null }>(
+        `${API_URL}/api/traces/${traceId}`
+      );
+      await playPath(nodesFromTrace(full?.spans ?? [], route ?? full?.route ?? null));
     } catch {
       await playPath(["router", "worker", "tracer"]);
     }
@@ -182,15 +189,17 @@ export default function Home() {
     setActiveNode("router"); // core starts "thinking"
 
     try {
-      const res = await authFetch(`${API_URL}/api/chat`, {
+      const data = await apiJson<{
+        reply: string;
+        trace_id?: string;
+        files?: FileOut[];
+        pending_approval?: PendingApproval;
+        pending_bulk_approval?: BulkApproval;
+      }>(`${API_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, session_id: sessionIdRef.current }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(typeof data?.detail === "string" ? data.detail : "Request failed");
-      }
       setMessages((prev) => [
         ...prev,
         { role: "assistant", content: data.reply, traceId: data.trace_id, files: data.files },
@@ -219,16 +228,7 @@ export default function Home() {
       else setActiveNode(null);
     } catch (err) {
       setActiveNode(null);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "error",
-          content:
-            err instanceof Error && err.message !== "Failed to fetch"
-              ? err.message
-              : "Couldn't reach the server. Is the backend running on port 8000?",
-        },
-      ]);
+      setMessages((prev) => [...prev, { role: "error", content: errMessage(err) }]);
     } finally {
       setLoading(false);
       inputRef.current?.focus();
@@ -244,28 +244,15 @@ export default function Home() {
     if (decision === "approved") spawnPulse("core", "email", "#f5b301");
     try {
       const endpoint = decision === "approved" ? "approve" : "reject";
-      const res = await authFetch(`${API_URL}/api/${endpoint}`, {
+      const data = await apiJson<{ reply: string }>(`${API_URL}/api/${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ approval_id: msg.pending.approval_id }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(typeof data?.detail === "string" ? data.detail : "Request failed");
-      }
       setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
     } catch (err) {
       setMessages((prev) => prev.map((m, i) => (i === index ? { ...m, decided: undefined } : m)));
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "error",
-          content:
-            err instanceof Error && err.message !== "Failed to fetch"
-              ? err.message
-              : "Couldn't reach the server. Is the backend running on port 8000?",
-        },
-      ]);
+      setMessages((prev) => [...prev, { role: "error", content: errMessage(err) }]);
     } finally {
       setLoading(false);
     }
@@ -281,26 +268,15 @@ export default function Home() {
       )
     );
     try {
-      const res = await authFetch(`${API_URL}/api/bulk/${decision}`, {
+      const data = await apiJson<{ reply: string }>(`${API_URL}/api/bulk/${decision}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ bulk_id: msg.bulk.bulk_id }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Request failed");
       setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
     } catch (err) {
       setMessages((prev) => prev.map((m, i) => (i === index ? { ...m, decided: undefined } : m)));
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "error",
-          content:
-            err instanceof Error && err.message !== "Failed to fetch"
-              ? err.message
-              : "Couldn't reach the server. Is the backend running on port 8000?",
-        },
-      ]);
+      setMessages((prev) => [...prev, { role: "error", content: errMessage(err) }]);
     } finally {
       setLoading(false);
     }
@@ -357,7 +333,7 @@ export default function Home() {
     setTimeout(() => setActiveNode(null), 700);
     setTimeout(() => setLitNodes(new Set()), 1600);
     try {
-      await fetch(`${API_URL}/api/feedback`, {
+      await apiJson(`${API_URL}/api/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -368,7 +344,7 @@ export default function Home() {
         }),
       });
     } catch {
-      /* best-effort */
+      /* best-effort — feedback failures are silent */
     }
   }
 

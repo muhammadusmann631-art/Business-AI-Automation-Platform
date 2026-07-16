@@ -40,11 +40,54 @@ export async function authFetch(path: string, opts: RequestInit = {}): Promise<R
   const token = getToken();
   const headers: Record<string, string> = { ...(opts.headers as Record<string, string>) };
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(path, { ...opts, headers });
-  if (res.status === 401 && typeof window !== "undefined") {
-    clearAuth();
-    const p = window.location.pathname;
-    if (!p.startsWith("/login") && !p.startsWith("/signup")) window.location.href = "/login";
+  return fetch(path, { ...opts, headers });
+}
+
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
   }
-  return res;
+}
+
+// The ONE wrapper every authenticated request should use. It:
+//  - always attaches the auth token (via authFetch),
+//  - checks response.ok BEFORE parsing (never parses non-JSON error bodies),
+//  - on 401 → clears the session, redirects to /login, throws a clean message,
+//  - on any other error → throws a clean, user-safe message (no "Unexpected
+//    token..." ever reaches the UI).
+export async function apiJson<T = unknown>(path: string, opts: RequestInit = {}): Promise<T> {
+  let res: Response;
+  try {
+    res = await authFetch(path, opts);
+  } catch {
+    throw new ApiError("Couldn't reach the server. Is the backend running?", 0);
+  }
+
+  if (res.status === 401) {
+    clearAuth();
+    if (typeof window !== "undefined") {
+      const p = window.location.pathname;
+      if (!p.startsWith("/login") && !p.startsWith("/signup")) window.location.href = "/login";
+    }
+    throw new ApiError("Session expired — please log in again.", 401);
+  }
+
+  if (!res.ok) {
+    let detail = "Something went wrong, please try again.";
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string") detail = data.detail;
+    } catch {
+      /* non-JSON error body (e.g. plain "Internal Server Error") — keep generic */
+    }
+    throw new ApiError(detail, res.status);
+  }
+
+  try {
+    return (await res.json()) as T;
+  } catch {
+    return null as T; // successful but empty/no body
+  }
 }

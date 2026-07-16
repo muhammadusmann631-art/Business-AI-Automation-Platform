@@ -21,7 +21,7 @@ export default function Login() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Login failed");
       setAuth(data.token, data.user);
       router.replace("/");

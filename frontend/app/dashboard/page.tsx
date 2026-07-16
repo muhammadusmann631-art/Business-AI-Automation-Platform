@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { authFetch, getToken } from "../lib/api";
+import { apiJson, getToken } from "../lib/api";
 import BusinessOverview, { type BusinessStats } from "../components/BusinessOverview";
 import AlertsBanner from "../components/AlertsBanner";
 
@@ -95,11 +95,11 @@ export default function Dashboard() {
   const refresh = useCallback(async () => {
     try {
       const [s, t, fs, fr, bz] = await Promise.all([
-        authFetch(`${API_URL}/api/stats`).then((r) => r.json()),
-        authFetch(`${API_URL}/api/traces?limit=50`).then((r) => r.json()),
-        authFetch(`${API_URL}/api/feedback/stats`).then((r) => r.json()),
-        authFetch(`${API_URL}/api/feedback/recent?limit=20`).then((r) => r.json()),
-        authFetch(`${API_URL}/api/dashboard/business-stats`).then((r) => r.json()),
+        apiJson<Stats>(`${API_URL}/api/stats`),
+        apiJson<{ traces: Trace[] }>(`${API_URL}/api/traces?limit=50`),
+        apiJson<FeedbackStats>(`${API_URL}/api/feedback/stats`),
+        apiJson<{ feedback: FeedbackEntry[] }>(`${API_URL}/api/feedback/recent?limit=20`),
+        apiJson<BusinessStats>(`${API_URL}/api/dashboard/business-stats`),
       ]);
       setStats(s);
       setTraces(t.traces ?? []);
@@ -126,8 +126,8 @@ export default function Dashboard() {
     setExpanded(traceId);
     if (!spans[traceId]) {
       try {
-        const full = await authFetch(`${API_URL}/api/traces/${traceId}`).then((r) => r.json());
-        setSpans((prev) => ({ ...prev, [traceId]: full.spans ?? [] }));
+        const full = await apiJson<{ spans?: Span[] }>(`${API_URL}/api/traces/${traceId}`);
+        setSpans((prev) => ({ ...prev, [traceId]: full?.spans ?? [] }));
       } catch {
         setSpans((prev) => ({ ...prev, [traceId]: [] }));
       }

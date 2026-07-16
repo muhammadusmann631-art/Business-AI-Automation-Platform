@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { authFetch } from "../lib/api";
+import { apiJson } from "../lib/api";
 
 type Alert = { id: string; level: "critical" | "warning" | "info"; message: string; details: string[] };
 
@@ -18,8 +18,8 @@ export default function AlertsBanner() {
 
   const load = useCallback(async () => {
     try {
-      const data = await authFetch("/api/alerts").then((r) => r.json());
-      setAlerts(data.alerts ?? []);
+      const data = await apiJson<{ alerts: Alert[] }>("/api/alerts");
+      setAlerts(data?.alerts ?? []);
       setLoaded(true);
     } catch {
       /* keep old on transient failure */
@@ -35,7 +35,7 @@ export default function AlertsBanner() {
   async function dismiss(id: string) {
     setAlerts((prev) => prev.filter((a) => a.id !== id)); // optimistic
     try {
-      await authFetch(`/api/alerts/dismiss/${id}`, { method: "POST" });
+      await apiJson(`/api/alerts/dismiss/${id}`, { method: "POST" });
     } catch {
       /* ignore */
     }

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { authFetch, getToken } from "../lib/api";
+import { apiJson, getToken } from "../lib/api";
 
 // Relative — Next.js rewrites proxy these to the backend (see next.config.ts).
 const API_URL = "";
@@ -56,12 +56,10 @@ export default function Admin() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const res = await authFetch(`${API_URL}/api/admin/preview-import/${table}`, {
+      const data = await apiJson<ImportPreview>(`${API_URL}/api/admin/preview-import/${table}`, {
         method: "POST",
         body: fd,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Preview failed");
       setPreview(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Preview failed");
@@ -76,12 +74,10 @@ export default function Admin() {
     try {
       const fd = new FormData();
       fd.append("file", pendingFile.current);
-      const res = await authFetch(`${API_URL}/api/admin/import/${table}`, {
+      const data = await apiJson<ImportResult>(`${API_URL}/api/admin/import/${table}`, {
         method: "POST",
         body: fd,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Import failed");
       setImportResult(data);
       setPreview(null);
       await load(table);
@@ -95,13 +91,14 @@ export default function Admin() {
   const load = useCallback(async (t: Table) => {
     setError(null);
     try {
-      const res = await authFetch(`${API_URL}/api/admin/${t}`);
-      const data = await res.json();
-      setColumns(data.columns ?? []);
-      setKeyCol(data.key ?? "id");
-      setRows(data.rows ?? []);
-    } catch {
-      setError("Couldn't reach the server. Is the backend running on port 8000?");
+      const data = await apiJson<{ columns: string[]; key: string; rows: Row[] }>(
+        `${API_URL}/api/admin/${t}`
+      );
+      setColumns(data?.columns ?? []);
+      setKeyCol(data?.key ?? "id");
+      setRows(data?.rows ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't load data.");
     }
   }, []);
 
@@ -134,15 +131,11 @@ export default function Admin() {
       const url = isNew
         ? `${API_URL}/api/admin/${table}`
         : `${API_URL}/api/admin/${table}/${editing[keyCol]}`;
-      const res = await authFetch(url, {
+      await apiJson(url, {
         method: isNew ? "POST" : "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ data: payload }),
       });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(typeof d?.detail === "string" ? d.detail : "Save failed");
-      }
       setEditing(null);
       await load(table);
     } catch (e) {
@@ -157,10 +150,7 @@ export default function Admin() {
     setBusy(true);
     setError(null);
     try {
-      const res = await authFetch(`${API_URL}/api/admin/${table}/${row[keyCol]}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) throw new Error("Delete failed");
+      await apiJson(`${API_URL}/api/admin/${table}/${row[keyCol]}`, { method: "DELETE" });
       await load(table);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
