@@ -112,6 +112,58 @@ def send_email(to: str, subject: str, body: str, attachment: str = "") -> str:
     return f"Email sent to {to} — subject: {subject}."
 
 
+def _build_message(sender: str, to: str, subject: str, body: str) -> EmailMessage:
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+    msg.add_alternative(format_email_body_html(subject, body), subtype="html")
+    return msg
+
+
+def send_bulk(messages: list[dict]) -> dict:
+    """Send many emails over ONE SMTP connection (fast — one login for all).
+
+    ``messages`` = [{to, subject, body}, ...]. Returns {success, failed, total,
+    skipped}. Missing credentials skip the send (counted as success, like the
+    single-email path) so the bulk approval flow still works in dev.
+    """
+    total = len(messages)
+    host = os.getenv("SMTP_HOST")
+    user = os.getenv("SMTP_USER")
+    password = os.getenv("SMTP_PASSWORD")
+
+    if not (host and user and password):
+        print(f"[EMAIL] bulk send skipped — no SMTP credentials configured ({total} emails)")
+        return {"success": total, "failed": 0, "total": total, "skipped": True}
+
+    port = int(os.getenv("SMTP_PORT", "587"))
+    sender = os.getenv("SMTP_FROM") or os.getenv("EMAIL_FROM") or user
+    if not sender or "@" not in sender or "your-email@" in sender:
+        sender = user
+
+    success = failed = 0
+    try:
+        with smtplib.SMTP(host, port, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(user, password)  # one login for the whole batch
+            for m in messages:
+                try:
+                    smtp.send_message(_build_message(sender, m["to"], m["subject"], m["body"]))
+                    success += 1
+                except Exception as e:
+                    print(f"[EMAIL] bulk item failed for {m.get('to')}: {e}")
+                    failed += 1
+    except Exception as e:
+        # Connection/login failed — none went out.
+        print(f"[EMAIL] bulk connection failed: {e}")
+        return {"success": 0, "failed": total, "total": total, "skipped": False}
+
+    print(f"[EMAIL] bulk sent {success}/{total} (failed {failed})")
+    return {"success": success, "failed": failed, "total": total, "skipped": False}
+
+
 if __name__ == "__main__":
     d = draft_email(
         "client@example.com",

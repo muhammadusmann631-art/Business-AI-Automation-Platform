@@ -83,6 +83,27 @@ export default function BusinessOverview({ stats }: { stats: BusinessStats | nul
   if (!stats) return null;
   const s = stats.summary;
 
+  const noData =
+    stats.revenue_trend.length === 0 &&
+    stats.expense_breakdown.length === 0 &&
+    (s.active_customers ?? 0) === 0;
+  if (noData) {
+    return (
+      <section className="mb-8">
+        <h2 className="mb-3 flex items-center gap-2 text-sm font-bold text-emerald-200">
+          <span>📊</span> Business Overview
+        </h2>
+        <div className="rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.05] p-8 text-center text-sm text-emerald-200/50">
+          No data yet. Import a CSV in the{" "}
+          <a href="/admin" className="font-semibold text-emerald-300 hover:text-emerald-200">
+            Admin panel
+          </a>{" "}
+          to see your business come alive.
+        </div>
+      </section>
+    );
+  }
+
   const cards = [
     { label: "Total Revenue", value: money(s.total_revenue), tone: "text-emerald-300" },
     { label: "Total Expenses", value: money(s.total_expenses), tone: "text-amber-300" },

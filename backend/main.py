@@ -37,7 +37,11 @@ import router
 import tracer
 import whatsapp
 from charting import CHARTS_DIR
-from emailing import draft_email as draft_email_impl, send_email as send_email_impl
+from emailing import (
+    draft_email as draft_email_impl,
+    send_bulk as send_bulk_impl,
+    send_email as send_email_impl,
+)
 from exporting import EXPORTS_DIR
 from memory import PreferenceStore, ShortTermMemory
 from reporting import REPORTS_DIR, generate_report as generate_report_impl
@@ -663,15 +667,12 @@ def bulk_email_reminders() -> str:
         return "No overdue invoices with a valid email address were found."
 
     def _execute() -> dict:
-        success = failed = 0
-        for it in items:
-            try:
-                send_email_impl(it["to"], it["subject"], it["body"])
-                success += 1
-            except Exception as e:
-                print(f"[BULK] email failed for {it['to']}: {e}")
-                failed += 1
-        return {"success": success, "failed": failed, "total": len(items)}
+        # One SMTP connection for the whole batch (fast — avoids a per-email
+        # login that would make the HTTP request hang and time out).
+        res = send_bulk_impl(
+            [{"to": it["to"], "subject": it["subject"], "body": it["body"]} for it in items]
+        )
+        return {"success": res["success"], "failed": res["failed"], "total": len(items)}
 
     preview = [
         {"to": it["to"], "subject": it["subject"], "amount": it["amount"],

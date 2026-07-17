@@ -24,7 +24,7 @@ export default function Login() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Login failed");
       setAuth(data.token, data.user);
-      router.replace("/");
+      router.replace("/chat");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {

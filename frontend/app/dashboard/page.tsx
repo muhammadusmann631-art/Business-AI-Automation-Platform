@@ -154,7 +154,7 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-2">
             <a
-              href="/"
+              href="/chat"
               className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-xs font-semibold text-emerald-300/80 transition hover:bg-emerald-500/10"
             >
               ← Chat
