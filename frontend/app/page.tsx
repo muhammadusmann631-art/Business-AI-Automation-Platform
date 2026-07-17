@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { getToken } from "./lib/api";
+import { useEffect, useState } from "react";
+import { getToken, getUser } from "./lib/api";
 
 const FEATURES = [
   {
@@ -57,14 +56,66 @@ const STATS = [
   { big: "24/7", small: "Available on web and WhatsApp" },
 ];
 
-export default function Landing() {
-  const router = useRouter();
+// The full multi-agent architecture, grouped by role.
+const AGENT_GROUPS: { group: string; items: { icon: string; name: string; desc: string }[] }[] = [
+  {
+    group: "Orchestration",
+    items: [
+      { icon: "🧠", name: "Supervisor", desc: "The manager. Understands your request and coordinates everything." },
+      { icon: "🗺️", name: "Planner", desc: "Breaks complex requests into clear, ordered steps." },
+      { icon: "🔀", name: "Router", desc: "Decides the fastest path — simple questions get instant answers, complex ones get the full pipeline." },
+    ],
+  },
+  {
+    group: "Intelligence",
+    items: [
+      { icon: "💾", name: "Memory", desc: "Remembers your conversation and preferences across sessions." },
+      { icon: "⚙️", name: "Worker", desc: "Executes each step using the right tools." },
+    ],
+  },
+  {
+    group: "Data & Tools",
+    items: [
+      { icon: "🗄️", name: "Database", desc: "Securely queries your sales, customers, invoices, and expenses (read-only)." },
+      { icon: "📄", name: "Report", desc: "Generates professional PDF reports." },
+      { icon: "📊", name: "Excel", desc: "Exports data to spreadsheets." },
+      { icon: "📈", name: "Charts", desc: "Creates visual graphs from your data." },
+      { icon: "📧", name: "Email", desc: "Drafts and sends professional emails." },
+    ],
+  },
+  {
+    group: "Safety & Quality",
+    items: [
+      { icon: "🛡️", name: "QA / Reviewer", desc: "Checks every output for accuracy, completeness, and sensitive data before it reaches you." },
+      { icon: "✋", name: "Approval", desc: "Pauses risky actions (like sending emails) for your explicit approval." },
+      { icon: "♻️", name: "Resilience", desc: "Retries on failure, never loses your work, alerts on problems." },
+    ],
+  },
+  {
+    group: "Insight & Learning",
+    items: [
+      { icon: "🔎", name: "Tracer", desc: "Records every step for full transparency — see exactly what happened." },
+      { icon: "🌱", name: "Feedback", desc: "Learns from your corrections to improve over time." },
+      { icon: "🔔", name: "Alerts", desc: "Proactively warns you about overdue invoices, low stock, and more." },
+    ],
+  },
+];
 
-  // Logged-in visitors are sent straight to the app. The landing still renders
-  // (good for SSR/SEO); the redirect happens right after hydration.
+export default function Landing() {
+  const [loggedIn, setLoggedIn] = useState(false);
+  const [name, setName] = useState<string | undefined>();
+
+  // We do NOT redirect logged-in users away — the landing is the front door
+  // for everyone. We only adapt the primary button.
   useEffect(() => {
-    if (getToken()) router.replace("/chat");
-  }, [router]);
+    if (getToken()) {
+      setLoggedIn(true);
+      setName(getUser()?.name);
+    }
+  }, []);
+
+  const primaryHref = loggedIn ? "/chat" : "/signup";
+  const primaryLabel = loggedIn ? "Enter AGI-CORE →" : "Get Started Free";
 
   return (
     <main className="min-h-full bg-[#050807] font-sans text-emerald-50/90">
@@ -78,18 +129,36 @@ export default function Landing() {
             <span className="text-sm font-semibold tracking-[0.3em]">AGI · CORE</span>
           </div>
           <nav className="flex items-center gap-2">
-            <a
-              href="/login"
-              className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-2 text-xs font-semibold text-emerald-300/80 transition hover:bg-emerald-500/10"
-            >
-              Login
-            </a>
-            <a
-              href="/signup"
-              className="rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-4 py-2 text-xs font-semibold text-black shadow-lg shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"
-            >
-              Sign Up
-            </a>
+            {loggedIn ? (
+              <>
+                {name && (
+                  <span className="mr-1 hidden text-xs text-emerald-200/50 sm:inline">
+                    Welcome back, {name}
+                  </span>
+                )}
+                <a
+                  href="/chat"
+                  className="rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-4 py-2 text-xs font-semibold text-black shadow-lg shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"
+                >
+                  Enter AGI-CORE →
+                </a>
+              </>
+            ) : (
+              <>
+                <a
+                  href="/login"
+                  className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-2 text-xs font-semibold text-emerald-300/80 transition hover:bg-emerald-500/10"
+                >
+                  Login
+                </a>
+                <a
+                  href="/signup"
+                  className="rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-4 py-2 text-xs font-semibold text-black shadow-lg shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"
+                >
+                  Sign Up
+                </a>
+              </>
+            )}
           </nav>
         </div>
       </header>
@@ -110,16 +179,16 @@ export default function Landing() {
           </p>
           <div className="fade-up mt-8 flex flex-wrap items-center justify-center gap-3">
             <a
-              href="/signup"
+              href={primaryHref}
               className="rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-6 py-3 text-sm font-semibold text-black shadow-lg shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"
             >
-              Get Started Free
+              {primaryLabel}
             </a>
             <a
-              href="/login"
+              href={loggedIn ? "/dashboard" : "/login"}
               className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.04] px-6 py-3 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/10"
             >
-              Login
+              {loggedIn ? "Dashboard" : "Login"}
             </a>
           </div>
         </div>
@@ -143,6 +212,50 @@ export default function Landing() {
               <p className="text-sm text-emerald-100/60">{f.body}</p>
             </div>
           ))}
+        </div>
+      </section>
+
+      {/* Inside AGI-CORE — agent showcase */}
+      <section className="relative overflow-hidden border-y border-emerald-500/10 bg-emerald-500/[0.02]">
+        <div className="hero-glow" />
+        <div className="relative mx-auto max-w-6xl px-4 py-16">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-emerald-500/30 bg-emerald-500/10 text-2xl shadow-lg shadow-emerald-500/20">
+            ✦
+          </div>
+          <h2 className="text-center text-2xl font-bold text-emerald-200">
+            Inside AGI-CORE — A team of specialized agents
+          </h2>
+          <p className="mx-auto mt-3 max-w-2xl text-center text-sm text-emerald-100/55">
+            Not a simple chatbot. A complete system where each agent has a job — planning,
+            remembering, querying, checking, and learning — all working together so you don&apos;t
+            have to.
+          </p>
+
+          <div className="mt-10 space-y-8">
+            {AGENT_GROUPS.map((g) => (
+              <div key={g.group}>
+                <h3 className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-emerald-300/60">
+                  {g.group}
+                </h3>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {g.items.map((c) => (
+                    <div
+                      key={c.name}
+                      className="feature-card flex gap-3 rounded-xl border border-emerald-500/15 bg-[#070c0a] p-4"
+                    >
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-lg">
+                        {c.icon}
+                      </span>
+                      <div>
+                        <p className="text-sm font-bold text-emerald-100">{c.name}</p>
+                        <p className="mt-0.5 text-xs text-emerald-100/55">{c.desc}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
@@ -179,13 +292,17 @@ export default function Landing() {
 
       {/* CTA */}
       <section className="mx-auto max-w-3xl px-4 py-20 text-center">
-        <h2 className="text-3xl font-bold text-emerald-100">Ready to automate your business work?</h2>
-        <p className="mt-3 text-emerald-100/60">Get started in minutes. No credit card required.</p>
+        <h2 className="text-3xl font-bold text-emerald-100">
+          {loggedIn ? "Welcome back — ready to dive in?" : "Ready to automate your business work?"}
+        </h2>
+        <p className="mt-3 text-emerald-100/60">
+          {loggedIn ? "Your assistant is standing by." : "Get started in minutes. No credit card required."}
+        </p>
         <a
-          href="/signup"
+          href={primaryHref}
           className="mt-7 inline-block rounded-xl bg-gradient-to-br from-emerald-400 to-teal-500 px-8 py-3.5 text-sm font-semibold text-black shadow-lg shadow-emerald-500/25 transition hover:from-emerald-300 hover:to-teal-400 active:scale-95"
         >
-          Get Started Free
+          {primaryLabel}
         </a>
       </section>
 

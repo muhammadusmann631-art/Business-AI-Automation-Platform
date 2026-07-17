@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { setAuth } from "../lib/api";
 
@@ -9,7 +9,15 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Show a success message when arriving from signup (?created=1).
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("created") === "1") {
+      setNotice("Account created! Please log in.");
+    }
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -47,6 +55,11 @@ export default function Login() {
           onSubmit={submit}
           className="space-y-3 rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.05] p-6"
         >
+          {notice && (
+            <p className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+              {notice}
+            </p>
+          )}
           {error && (
             <p className="rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
               {error}

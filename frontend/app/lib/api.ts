@@ -33,7 +33,7 @@ export function clearAuth() {
 
 export function logout() {
   clearAuth();
-  if (typeof window !== "undefined") window.location.href = "/login";
+  if (typeof window !== "undefined") window.location.href = "/"; // back to the landing page
 }
 
 export async function authFetch(path: string, opts: RequestInit = {}): Promise<Response> {
