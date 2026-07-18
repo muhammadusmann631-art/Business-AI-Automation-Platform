@@ -48,7 +48,7 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 def _public(user: dict) -> dict:
     """User fields safe to expose (never the password hash)."""
-    return {"id": user["id"], "name": user["name"], "email": user["email"], "role": user["role"]}
+    return {"id": user["id"],  "name": user["name"], "email": user["email"], "role": user["role"]}
 
 
 def make_token(user: dict) -> str:
